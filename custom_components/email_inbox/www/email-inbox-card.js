@@ -1,600 +1,679 @@
 /**
- * email-inbox-card  v2.0.0
- * Full-width horizontal card showing unread emails only.
- * Click any email to open a full popup reader.
- * Delete and mark-as-read buttons on each tile and in the popup.
+ * email-inbox-card  v3.0.0
+ *
+ * Changes from v2:
+ *  - Full-width: getGridOptions() + :host grid-column:1/-1
+ *  - Popup rendered on document.body (outside all shadow DOMs) so
+ *    position:fixed works correctly across the full viewport
+ *  - Popup cleaned up on disconnectedCallback
+ *  - Confirm dialog also on document.body
  */
 
-const CARD_VERSION = "2.0.0";
+const CARD_VERSION = "3.0.0";
 
-// ── Utility ──────────────────────────────────────────────────────────────────
-function esc(s) {
-  return String(s ?? "")
-    .replace(/&/g, "&amp;").replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
-}
+// ── Helpers ───────────────────────────────────────────────────────────────────
+const esc = s => String(s ?? "")
+  .replace(/&/g,"&amp;").replace(/</g,"&lt;")
+  .replace(/>/g,"&gt;").replace(/"/g,"&quot;").replace(/'/g,"&#39;");
 
 function fmtDate(d) {
   if (!d) return "";
   try {
     const dt = new Date(d), now = new Date(), diff = now - dt;
     if (diff < 86400000 && dt.getDate() === now.getDate())
-      return dt.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+      return dt.toLocaleTimeString([], { hour:"2-digit", minute:"2-digit" });
     if (diff < 7 * 86400000)
-      return dt.toLocaleDateString([], { weekday: "short", hour: "2-digit", minute: "2-digit" });
-    return dt.toLocaleDateString([], { month: "short", day: "numeric", year: "numeric" });
-  } catch { return String(d).slice(0, 10); }
+      return dt.toLocaleDateString([], { weekday:"short", hour:"2-digit", minute:"2-digit" });
+    return dt.toLocaleDateString([], { month:"short", day:"numeric", year:"numeric" });
+  } catch { return String(d).slice(0,10); }
 }
 
-function senderName(from) {
+const senderName = from => {
   if (!from) return "Unknown";
   const m = from.match(/^"?([^"<]+?)"?\s*(?:<.*>)?$/);
   return (m ? m[1] : from.split("@")[0]).trim();
-}
+};
+const senderAddr = from => (String(from??"").match(/<([^>]+)>/) ?? [])[1] ?? from;
 
-function senderEmail(from) {
-  const m = String(from ?? "").match(/<([^>]+)>/);
-  return m ? m[1] : from;
+function initials(n) {
+  const p = n.split(/\s+/).filter(Boolean);
+  return p.length >= 2 ? (p[0][0]+p[p.length-1][0]).toUpperCase() : n.slice(0,2).toUpperCase();
 }
-
-function initials(name) {
-  const parts = name.split(/\s+/).filter(Boolean);
-  if (parts.length >= 2) return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
-  return name.slice(0, 2).toUpperCase();
-}
-
-function avatarColor(name) {
-  const colors = ["#6366f1","#8b5cf6","#ec4899","#ef4444","#f97316",
-                  "#eab308","#22c55e","#14b8a6","#3b82f6","#06b6d4"];
+function avatarColor(n) {
+  const C = ["#6366f1","#8b5cf6","#ec4899","#ef4444","#f97316",
+             "#eab308","#22c55e","#14b8a6","#3b82f6","#06b6d4"];
   let h = 0;
-  for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) | 0;
-  return colors[Math.abs(h) % colors.length];
+  for (let i = 0; i < n.length; i++) h = (h*31 + n.charCodeAt(i)) | 0;
+  return C[Math.abs(h) % C.length];
 }
 
-// ── Icons ────────────────────────────────────────────────────────────────────
-const ICO = {
-  refresh: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15"/></svg>`,
-  trash:   `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4h6v2"/></svg>`,
-  read:    `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 11-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>`,
-  close:   `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>`,
-  inbox:   `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/><path d="M5.45 5.11L2 12v6a2 2 0 002 2h16a2 2 0 002-2v-6l-3.45-6.89A2 2 0 0016.76 4H7.24a2 2 0 00-1.79 1.11z"/></svg>`,
-  spinner: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10" stroke-dasharray="31.4" stroke-dashoffset="10" stroke-linecap="round"><animateTransform attributeName="transform" type="rotate" dur="0.8s" repeatCount="indefinite" from="0 12 12" to="360 12 12"/></circle></svg>`,
-  external:`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>`,
+// ── Icons ─────────────────────────────────────────────────────────────────────
+const I = {
+  refresh:`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15"/></svg>`,
+  trash:  `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4h6v2"/></svg>`,
+  check:  `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 11-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>`,
+  close:  `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>`,
+  inbox:  `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/><path d="M5.45 5.11L2 12v6a2 2 0 002 2h16a2 2 0 002-2v-6l-3.45-6.89A2 2 0 0016.76 4H7.24a2 2 0 00-1.79 1.11z"/></svg>`,
+  spin:   `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="10" stroke-dasharray="31.4" stroke-dashoffset="10" stroke-linecap="round"><animateTransform attributeName="transform" type="rotate" dur="0.75s" repeatCount="indefinite" from="0 12 12" to="360 12 12"/></circle></svg>`,
 };
 
-// ── Styles ───────────────────────────────────────────────────────────────────
-const STYLES = `
-  :host { display: block;
-    --bg:       var(--ha-card-background, var(--card-background-color, #fff));
-    --primary:  var(--primary-color, #03a9f4);
-    --txt1:     var(--primary-text-color, #1e293b);
-    --txt2:     var(--secondary-text-color, #64748b);
-    --divider:  var(--divider-color, #e2e8f0);
-    --danger:   #ef4444;
-    --accent:   var(--accent-color, #6366f1);
-    --radius:   var(--ha-card-border-radius, 12px);
+// ── Card shadow-DOM styles (card only, no overlay) ─────────────────────────
+const CARD_STYLES = `
+  :host {
+    display: block;
+    /* Full-width inside HA's CSS grid */
+    grid-column: 1 / -1;
+    --bg:      var(--ha-card-background, var(--card-background-color, #fff));
+    --txt1:    var(--primary-text-color, #1e293b);
+    --txt2:    var(--secondary-text-color, #64748b);
+    --div:     var(--divider-color, #e2e8f0);
+    --acc:     var(--accent-color, #6366f1);
+    --danger:  #ef4444;
   }
-  ha-card { overflow: visible; }
+  ha-card { overflow: hidden; width: 100%; }
 
-  /* ── Header ── */
+  /* Header */
   .hdr {
     display: flex; align-items: center; justify-content: space-between;
-    padding: 14px 18px 12px;
-    border-bottom: 1px solid var(--divider);
+    padding: 14px 20px 12px;
+    border-bottom: 1px solid var(--div);
   }
-  .hdr-left { display: flex; align-items: center; gap: 10px; }
+  .hdr-l { display: flex; align-items: center; gap: 10px; }
   .hdr h2 { margin: 0; font-size: .95rem; font-weight: 700; color: var(--txt1); }
   .badge {
-    background: var(--accent); color: #fff;
+    background: var(--acc); color: #fff;
     border-radius: 20px; padding: 2px 9px;
-    font-size: .7rem; font-weight: 700; min-width: 22px; text-align: center;
+    font-size: .7rem; font-weight: 700;
   }
-  .badge.zero { background: var(--divider); color: var(--txt2); }
+  .badge.z { background: var(--div); color: var(--txt2); }
   .acct { font-size: .72rem; color: var(--txt2); }
-  .hdr-right { display: flex; gap: 6px; }
   .icon-btn {
     background: none; border: none; cursor: pointer; padding: 6px;
     border-radius: 8px; color: var(--txt2); display: flex; align-items: center;
     transition: background .15s, color .15s;
   }
-  .icon-btn:hover { background: rgba(99,102,241,.1); color: var(--accent); }
+  .icon-btn:hover { background: rgba(99,102,241,.1); color: var(--acc); }
   .icon-btn svg { width: 16px; height: 16px; }
 
-  /* ── Horizontal scroll strip ── */
-  .strip-wrap {
+  /* Error bar */
+  .err { margin: 8px 20px; padding: 10px 14px; border-radius: 8px;
+    background: rgba(239,68,68,.08); border-left: 3px solid var(--danger);
+    font-size: .8rem; color: var(--danger); }
+
+  /* Horizontal scroll strip */
+  .strip {
+    display: flex; align-items: stretch; gap: 14px;
     overflow-x: auto; overflow-y: hidden;
-    display: flex; align-items: stretch;
-    padding: 14px 18px 16px; gap: 14px;
+    padding: 16px 20px 18px;
     scroll-snap-type: x mandatory;
     -webkit-overflow-scrolling: touch;
     scrollbar-width: thin;
-    scrollbar-color: var(--divider) transparent;
+    scrollbar-color: var(--div) transparent;
   }
-  .strip-wrap::-webkit-scrollbar { height: 4px; }
-  .strip-wrap::-webkit-scrollbar-track { background: transparent; }
-  .strip-wrap::-webkit-scrollbar-thumb { background: var(--divider); border-radius: 4px; }
+  .strip::-webkit-scrollbar { height: 5px; }
+  .strip::-webkit-scrollbar-thumb { background: var(--div); border-radius: 3px; }
 
-  /* ── Email tile ── */
+  /* Tile */
   .tile {
-    flex: 0 0 260px; scroll-snap-align: start;
-    background: var(--bg);
-    border: 1px solid var(--divider);
-    border-left: 3px solid var(--accent);
+    flex: 0 0 var(--tile-w, 260px);
+    scroll-snap-align: start;
+    border: 1px solid var(--div);
+    border-left: 3px solid var(--acc);
     border-radius: 10px;
     padding: 14px;
     cursor: pointer;
-    transition: transform .15s, box-shadow .15s, border-color .15s;
     display: flex; flex-direction: column; gap: 8px;
-    position: relative;
-    min-height: 130px;
+    transition: transform .15s, box-shadow .15s;
+    background: var(--bg);
+    min-height: 136px;
+    user-select: none;
   }
-  .tile:hover { transform: translateY(-2px); box-shadow: 0 6px 20px rgba(0,0,0,.1); border-color: var(--accent); }
-
+  .tile:hover { transform: translateY(-2px); box-shadow: 0 6px 20px rgba(0,0,0,.1); }
   .tile-top { display: flex; align-items: center; gap: 10px; }
-  .avatar {
+  .av {
     width: 36px; height: 36px; border-radius: 50%; flex-shrink: 0;
     display: flex; align-items: center; justify-content: center;
-    font-size: .75rem; font-weight: 700; color: #fff; letter-spacing: .03em;
+    font-size: .75rem; font-weight: 700; color: #fff;
   }
-  .tile-meta { flex: 1; min-width: 0; }
-  .tile-sender {
-    font-size: .82rem; font-weight: 700; color: var(--txt1);
-    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-  }
-  .tile-date { font-size: .68rem; color: var(--txt2); margin-top: 1px; }
-  .tile-subject {
-    font-size: .82rem; color: var(--txt1); font-weight: 600;
+  .meta { flex: 1; min-width: 0; }
+  .sender { font-size: .82rem; font-weight: 700; color: var(--txt1);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .tdate  { font-size: .68rem; color: var(--txt2); margin-top: 1px; }
+  .subj   { font-size: .82rem; font-weight: 600; color: var(--txt1);
     overflow: hidden; display: -webkit-box;
-    -webkit-line-clamp: 2; -webkit-box-orient: vertical;
-    line-height: 1.35;
-  }
-  .tile-snippet {
-    font-size: .76rem; color: var(--txt2); flex: 1;
+    -webkit-line-clamp: 2; -webkit-box-orient: vertical; line-height: 1.35; }
+  .snip   { font-size: .76rem; color: var(--txt2); flex: 1;
     overflow: hidden; display: -webkit-box;
-    -webkit-line-clamp: 2; -webkit-box-orient: vertical;
-    line-height: 1.4;
+    -webkit-line-clamp: 2; -webkit-box-orient: vertical; line-height: 1.4; }
+  .tile-acts {
+    display: flex; gap: 6px; margin-top: auto;
+    padding-top: 8px; border-top: 1px solid var(--div);
   }
-  .tile-actions {
-    display: flex; gap: 6px; margin-top: auto; padding-top: 6px;
-    border-top: 1px solid var(--divider);
-  }
-  .tile-btn {
+  .tbtn {
     flex: 1; display: flex; align-items: center; justify-content: center; gap: 5px;
     font-size: .72rem; font-weight: 600; padding: 5px 8px;
     border: none; border-radius: 6px; cursor: pointer;
-    transition: background .15s, color .15s;
-  }
-  .tile-btn svg { width: 13px; height: 13px; flex-shrink: 0; }
-  .tile-btn.btn-read { background: rgba(99,102,241,.1); color: var(--accent); }
-  .tile-btn.btn-read:hover { background: rgba(99,102,241,.2); }
-  .tile-btn.btn-del  { background: rgba(239,68,68,.08); color: var(--danger); }
-  .tile-btn.btn-del:hover  { background: rgba(239,68,68,.18); }
-  .tile-btn:disabled { opacity: .4; pointer-events: none; }
-
-  /* ── Empty / Error states ── */
-  .empty {
-    width: 100%; text-align: center; padding: 28px 20px;
-    color: var(--txt2); font-size: .88rem;
-    display: flex; flex-direction: column; align-items: center; gap: 10px;
-  }
-  .empty svg { width: 40px; height: 40px; opacity: .3; }
-  .err-bar {
-    margin: 8px 18px; padding: 10px 14px; border-radius: 8px;
-    background: rgba(239,68,68,.08); border-left: 3px solid var(--danger);
-    font-size: .8rem; color: var(--danger);
-  }
-
-  /* ── Popup overlay ── */
-  .popup-overlay {
-    position: fixed; inset: 0; z-index: 9999;
-    background: rgba(0,0,0,.55); backdrop-filter: blur(3px);
-    display: flex; align-items: center; justify-content: center;
-    padding: 20px; animation: fadeIn .15s ease;
-  }
-  @keyframes fadeIn { from { opacity: 0 } to { opacity: 1 } }
-  .popup {
-    background: var(--bg);
-    border-radius: 16px;
-    width: 100%; max-width: 720px;
-    max-height: 85vh;
-    display: flex; flex-direction: column;
-    box-shadow: 0 24px 60px rgba(0,0,0,.25);
-    overflow: hidden;
-    animation: slideUp .18s ease;
-  }
-  @keyframes slideUp { from { transform: translateY(20px); opacity: 0 } to { transform: translateY(0); opacity: 1 } }
-
-  .popup-hdr {
-    padding: 18px 20px 14px;
-    border-bottom: 1px solid var(--divider);
-    display: flex; align-items: flex-start; gap: 14px;
-  }
-  .popup-avatar {
-    width: 44px; height: 44px; border-radius: 50%; flex-shrink: 0;
-    display: flex; align-items: center; justify-content: center;
-    font-size: .9rem; font-weight: 700; color: #fff;
-  }
-  .popup-hdr-info { flex: 1; min-width: 0; }
-  .popup-subject {
-    font-size: 1rem; font-weight: 700; color: var(--txt1);
-    margin: 0 0 4px; line-height: 1.3;
-    word-break: break-word;
-  }
-  .popup-from { font-size: .8rem; color: var(--txt2); }
-  .popup-from strong { color: var(--txt1); font-weight: 600; }
-  .popup-date { font-size: .75rem; color: var(--txt2); margin-top: 3px; }
-
-  .popup-hdr-actions { display: flex; gap: 6px; flex-shrink: 0; flex-wrap: wrap; justify-content: flex-end; }
-  .popup-action-btn {
-    display: flex; align-items: center; gap: 5px;
-    font-size: .78rem; font-weight: 600; padding: 7px 13px;
-    border: none; border-radius: 8px; cursor: pointer;
     transition: background .15s;
   }
-  .popup-action-btn svg { width: 14px; height: 14px; }
-  .popup-action-btn.btn-read { background: rgba(99,102,241,.12); color: var(--accent); }
-  .popup-action-btn.btn-read:hover { background: rgba(99,102,241,.22); }
-  .popup-action-btn.btn-del  { background: rgba(239,68,68,.1); color: var(--danger); }
-  .popup-action-btn.btn-del:hover  { background: rgba(239,68,68,.2); }
-  .popup-action-btn.btn-close { background: var(--divider); color: var(--txt1); }
-  .popup-action-btn.btn-close:hover { background: #cbd5e1; }
-  .popup-action-btn:disabled { opacity: .4; pointer-events: none; }
+  .tbtn svg { width: 13px; height: 13px; flex-shrink: 0; }
+  .tbtn.r { background: rgba(99,102,241,.1); color: var(--acc); }
+  .tbtn.r:hover { background: rgba(99,102,241,.22); }
+  .tbtn.d { background: rgba(239,68,68,.08); color: var(--danger); }
+  .tbtn.d:hover { background: rgba(239,68,68,.18); }
+  .tbtn:disabled { opacity: .4; pointer-events: none; }
 
-  .popup-body {
-    flex: 1; overflow-y: auto; padding: 20px;
-    font-size: .88rem; line-height: 1.65; color: var(--txt1);
+  /* Empty state */
+  .empty {
+    display: flex; flex-direction: column; align-items: center; gap: 10px;
+    padding: 32px; width: 100%; color: var(--txt2); font-size: .88rem;
   }
-  .popup-body iframe {
-    width: 100%; border: none; border-radius: 8px;
-    min-height: 300px; background: #fff;
-  }
-  .popup-body .plain-body {
-    white-space: pre-wrap; word-break: break-word;
-    font-family: inherit; color: var(--txt1);
-  }
-  .popup-loading {
-    display: flex; flex-direction: column; align-items: center; justify-content: center;
-    gap: 12px; padding: 48px; color: var(--txt2); font-size: .88rem;
-  }
-  .popup-loading svg { width: 28px; height: 28px; color: var(--accent); }
-  .popup-err { color: var(--danger); padding: 24px; text-align: center; font-size: .85rem; }
+  .empty svg { width: 40px; height: 40px; opacity: .25; }
+`;
 
-  /* ── Confirm delete overlay ── */
-  .confirm-overlay {
-    position: fixed; inset: 0; z-index: 10000;
+// ── Popup styles — injected into document.body element (NOT shadow DOM) ──────
+const POPUP_STYLES = `
+  #eic-popup-root * { box-sizing: border-box; }
+  #eic-popup-root {
+    --bg:     #ffffff;
+    --txt1:   #1e293b;
+    --txt2:   #64748b;
+    --div:    #e2e8f0;
+    --acc:    #6366f1;
+    --danger: #ef4444;
+  }
+  @media (prefers-color-scheme: dark) {
+    #eic-popup-root {
+      --bg:   #1e293b;
+      --txt1: #f1f5f9;
+      --txt2: #94a3b8;
+      --div:  #334155;
+    }
+  }
+  .eic-overlay {
+    position: fixed; inset: 0; z-index: 999999;
     background: rgba(0,0,0,.6);
-    display: flex; align-items: center; justify-content: center; padding: 20px;
+    backdrop-filter: blur(4px);
+    display: flex; align-items: center; justify-content: center;
+    padding: 24px;
+    animation: eicFadeIn .15s ease;
   }
-  .confirm-box {
-    background: var(--bg); border-radius: 14px; padding: 28px 24px;
-    max-width: 340px; width: 100%; text-align: center;
-    box-shadow: 0 16px 48px rgba(0,0,0,.25);
+  @keyframes eicFadeIn { from { opacity:0 } to { opacity:1 } }
+  .eic-dialog {
+    background: var(--bg);
+    border-radius: 16px;
+    width: 100%; max-width: 760px;
+    max-height: 88vh;
+    display: flex; flex-direction: column;
+    box-shadow: 0 32px 80px rgba(0,0,0,.35);
+    overflow: hidden;
+    animation: eicSlide .18s ease;
   }
-  .confirm-box h3 { margin: 0 0 8px; font-size: .95rem; color: var(--txt1); }
-  .confirm-box p  { margin: 0 0 20px; font-size: .82rem; color: var(--txt2); }
-  .confirm-preview {
-    font-size: .8rem; font-weight: 600; color: var(--txt1);
-    background: var(--divider); border-radius: 6px; padding: 8px 12px;
+  @keyframes eicSlide { from { transform:translateY(18px);opacity:0 } to { transform:none;opacity:1 } }
+
+  /* Dialog header */
+  .eic-dhdr {
+    display: flex; align-items: flex-start; gap: 14px;
+    padding: 20px 20px 16px;
+    border-bottom: 1px solid var(--div);
+    flex-shrink: 0;
+  }
+  .eic-av {
+    width: 46px; height: 46px; border-radius: 50%; flex-shrink: 0;
+    display: flex; align-items: center; justify-content: center;
+    font-size: .92rem; font-weight: 700; color: #fff;
+  }
+  .eic-hinfo { flex: 1; min-width: 0; }
+  .eic-subj {
+    font-size: 1.05rem; font-weight: 700; color: var(--txt1);
+    margin: 0 0 5px; line-height: 1.3; word-break: break-word;
+  }
+  .eic-from { font-size: .82rem; color: var(--txt2); }
+  .eic-from strong { color: var(--txt1); font-weight: 600; }
+  .eic-date { font-size: .76rem; color: var(--txt2); margin-top: 3px; }
+
+  .eic-hbtns {
+    display: flex; gap: 7px; flex-shrink: 0;
+    flex-wrap: wrap; align-items: flex-start; justify-content: flex-end;
+  }
+  .eic-btn {
+    display: flex; align-items: center; gap: 5px;
+    font-size: .8rem; font-weight: 600;
+    padding: 8px 14px; border: none; border-radius: 8px;
+    cursor: pointer; transition: background .15s; white-space: nowrap;
+  }
+  .eic-btn svg { width: 14px; height: 14px; flex-shrink: 0; }
+  .eic-btn.r  { background: rgba(99,102,241,.12); color: var(--acc); }
+  .eic-btn.r:hover  { background: rgba(99,102,241,.24); }
+  .eic-btn.d  { background: rgba(239,68,68,.1); color: var(--danger); }
+  .eic-btn.d:hover  { background: rgba(239,68,68,.22); }
+  .eic-btn.cl { background: var(--div); color: var(--txt1); }
+  .eic-btn.cl:hover { background: #cbd5e1; }
+  .eic-btn:disabled { opacity: .4; pointer-events: none; }
+
+  /* Dialog body */
+  .eic-dbody {
+    flex: 1; overflow-y: auto; padding: 20px;
+    font-size: .9rem; line-height: 1.7; color: var(--txt1);
+  }
+  .eic-loading {
+    display: flex; flex-direction: column; align-items: center;
+    justify-content: center; gap: 14px; padding: 56px;
+    color: var(--txt2); font-size: .9rem;
+  }
+  .eic-loading svg { width: 30px; height: 30px; color: var(--acc); }
+  .eic-err { color: var(--danger); padding: 28px; text-align: center; font-size: .88rem; }
+  .eic-err code { display:block; margin-top:8px; font-size:.78rem; opacity:.8; }
+  .eic-plain {
+    white-space: pre-wrap; word-break: break-word;
+    font-family: inherit; font-size: .88rem;
+    color: var(--txt1); line-height: 1.7;
+  }
+  .eic-iframe {
+    width: 100%; border: none; min-height: 300px;
+    border-radius: 8px; background: #fff; display: block;
+  }
+
+  /* Confirm overlay — stacks above popup */
+  .eic-confirm-overlay {
+    position: fixed; inset: 0; z-index: 1000000;
+    background: rgba(0,0,0,.65);
+    display: flex; align-items: center; justify-content: center; padding: 24px;
+  }
+  .eic-confirm-box {
+    background: var(--bg); border-radius: 14px; padding: 30px 24px;
+    max-width: 360px; width: 100%; text-align: center;
+    box-shadow: 0 20px 56px rgba(0,0,0,.3);
+  }
+  .eic-confirm-box h3 { margin: 0 0 8px; font-size: 1rem; color: var(--txt1); }
+  .eic-confirm-box p  { margin: 0 0 16px; font-size: .84rem; color: var(--txt2); }
+  .eic-subj-preview {
+    font-size: .82rem; font-weight: 600; color: var(--txt1);
+    background: var(--div); border-radius: 6px; padding: 8px 12px;
     margin-bottom: 20px; overflow: hidden; text-overflow: ellipsis;
     white-space: nowrap;
   }
-  .confirm-actions { display: flex; gap: 10px; }
-  .confirm-btn {
-    flex: 1; padding: 10px; border: none; border-radius: 8px; cursor: pointer;
-    font-size: .85rem; font-weight: 600; transition: opacity .15s;
+  .eic-confirm-row { display: flex; gap: 10px; }
+  .eic-confirm-btn {
+    flex: 1; padding: 11px; border: none; border-radius: 8px;
+    cursor: pointer; font-size: .88rem; font-weight: 600;
+    transition: opacity .15s;
   }
-  .confirm-btn:hover { opacity: .85; }
-  .confirm-btn.cancel { background: var(--divider); color: var(--txt1); }
-  .confirm-btn.danger { background: var(--danger); color: #fff; }
+  .eic-confirm-btn:hover { opacity: .85; }
+  .eic-confirm-btn.cancel { background: var(--div); color: var(--txt1); }
+  .eic-confirm-btn.del    { background: var(--danger); color: #fff; }
 `;
 
-// ── Card Element ─────────────────────────────────────────────────────────────
+// ── Custom Element ────────────────────────────────────────────────────────────
 class EmailInboxCard extends HTMLElement {
   constructor() {
     super();
     this.attachShadow({ mode: "open" });
-    this._hass     = null;
-    this._config   = {};
-    this._popup    = null;   // { email, loading, body_html, body_text, error }
-    this._confirm  = null;   // { id, subject, fromPopup }
-    this._busy     = new Set();
-    this._lastErr  = "";
+    this._hass   = null;
+    this._config = {};
+    this._popup  = null;   // { email, loading, body_html, body_text, error }
+    this._confirm= null;   // { id, subject }
+    this._busy   = new Set();
+    this._lastErr= "";
+
+    // Root element appended to document.body for overlays
+    this._bodyRoot = null;
+    this._keyHandler = null;
   }
 
+  // ── Lifecycle ───────────────────────────────────────────────────────────────
+  connectedCallback() {
+    // Inject global popup styles once
+    if (!document.getElementById("eic-global-styles")) {
+      const s = document.createElement("style");
+      s.id = "eic-global-styles";
+      s.textContent = POPUP_STYLES;
+      document.head.appendChild(s);
+    }
+    // Create the body-level root for overlays
+    if (!this._bodyRoot) {
+      this._bodyRoot = document.createElement("div");
+      this._bodyRoot.id = "eic-popup-root";
+      document.body.appendChild(this._bodyRoot);
+    }
+  }
+
+  disconnectedCallback() {
+    this._removeBodyRoot();
+    if (this._keyHandler) {
+      document.removeEventListener("keydown", this._keyHandler);
+      this._keyHandler = null;
+    }
+  }
+
+  _removeBodyRoot() {
+    if (this._bodyRoot) {
+      this._bodyRoot.remove();
+      this._bodyRoot = null;
+    }
+  }
+
+  // ── Config ──────────────────────────────────────────────────────────────────
   setConfig(cfg) {
     if (!cfg.entity)   throw new Error("email-inbox-card: 'entity' is required");
     if (!cfg.entry_id) throw new Error("email-inbox-card: 'entry_id' is required");
     this._config = {
-      title:      cfg.title      ?? "Unread Emails",
-      entity:     cfg.entity,
-      entry_id:   cfg.entry_id,
-      max_display:cfg.max_display ?? 20,
-      tile_width: cfg.tile_width ?? 260,
+      title:          cfg.title          ?? "Unread Emails",
+      entity:         cfg.entity,
+      entry_id:       cfg.entry_id,
+      max_display:    cfg.max_display    ?? 20,
+      tile_width:     cfg.tile_width     ?? 260,
       confirm_delete: cfg.confirm_delete !== false,
     };
-    this._render();
+    this._renderCard();
   }
 
   set hass(hass) {
     this._hass = hass;
-    this._render();
+    this._renderCard();
   }
 
-  // ── Data helpers ───────────────────────────────────────────────────────────
-  _state()  { return this._hass?.states?.[this._config.entity]; }
+  // ── Data helpers ─────────────────────────────────────────────────────────────
+  _st()     { return this._hass?.states?.[this._config.entity]; }
   _emails() {
-    const emails = this._state()?.attributes?.emails ?? [];
-    return emails
+    return (this._st()?.attributes?.emails ?? [])
       .filter(e => e.unread)
       .slice(0, this._config.max_display);
   }
-  _unread() { return this._state()?.attributes?.unread_count ?? 0; }
-  _account(){ return this._state()?.attributes?.account ?? ""; }
-  _unavail(){ const s = this._state()?.state; return !s || s === "unavailable" || s === "unknown"; }
+  _unread() { return this._st()?.attributes?.unread_count ?? 0; }
+  _account(){ return this._st()?.attributes?.account ?? ""; }
+  _unavail(){ const s = this._st()?.state; return !s || s==="unavailable" || s==="unknown"; }
 
-  // ── Actions ────────────────────────────────────────────────────────────────
+  // ── HA grid — tell HA this card wants full width ──────────────────────────
+  getGridOptions() {
+    return { columns: 12, rows: 3, min_columns: 4, min_rows: 2 };
+  }
+  getCardSize() { return 3; }
+
+  // ── Service calls ────────────────────────────────────────────────────────────
   async _doService(service, messageId) {
     this._busy.add(messageId);
     this._lastErr = "";
-    this._render();
+    this._renderCard();
+    this._renderOverlay();
     try {
       await this._hass.callService("email_inbox", service, {
         entry_id:   this._config.entry_id,
         message_id: messageId,
       });
     } catch (err) {
-      console.error("email-inbox-card:", err);
       this._lastErr = String(err?.message ?? err);
+      console.error("email-inbox-card:", err);
     } finally {
       this._busy.delete(messageId);
       this._confirm = null;
       if (service === "delete_email" && this._popup?.email?.id === messageId) {
         this._popup = null;
       }
-      this._render();
-    }
-  }
-
-  _openPopup(email) {
-    this._popup = { email, loading: true, body_html: "", body_text: "", error: "" };
-    this._render();
-    this._loadBody(email.id);
-  }
-
-  async _loadBody(messageId) {
-    try {
-      const token = this._hass.auth?.data?.access_token ?? "";
-      const url = `/api/email_inbox/message_body?entry_id=${encodeURIComponent(this._config.entry_id)}&message_id=${encodeURIComponent(messageId)}`;
-      const resp = await fetch(url, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      const data = await resp.json();
-      if (!resp.ok) throw new Error(data.error ?? `HTTP ${resp.status}`);
-      if (this._popup && this._popup.email?.id === messageId) {
-        this._popup = { ...this._popup, loading: false, ...data };
-        this._render();
-      }
-    } catch (err) {
-      if (this._popup && this._popup.email?.id === messageId) {
-        this._popup = { ...this._popup, loading: false, error: String(err.message ?? err) };
-        this._render();
-      }
-    }
-  }
-
-  _closePopup() { this._popup = null; this._render(); }
-
-  _askDelete(id, subject, fromPopup = false) {
-    if (this._config.confirm_delete) {
-      this._confirm = { id, subject, fromPopup };
-      this._render();
-    } else {
-      this._doService("delete_email", id);
+      this._renderCard();
+      this._renderOverlay();
     }
   }
 
   async _refresh() {
     try {
-      await this._hass.callService("homeassistant", "update_entity", { entity_id: this._config.entity });
+      await this._hass.callService("homeassistant", "update_entity",
+        { entity_id: this._config.entity });
     } catch {}
   }
 
-  // ── Render ─────────────────────────────────────────────────────────────────
-  _render() {
+  // ── Popup ─────────────────────────────────────────────────────────────────
+  _openPopup(email) {
+    this._popup = { email, loading: true, body_html: "", body_text: "", error: "" };
+    this._renderOverlay();
+    this._loadBody(email.id);
+    // Keyboard close
+    if (this._keyHandler) document.removeEventListener("keydown", this._keyHandler);
+    this._keyHandler = e => { if (e.key === "Escape") this._closePopup(); };
+    document.addEventListener("keydown", this._keyHandler);
+  }
+
+  _closePopup() {
+    this._popup = null;
+    this._confirm = null;
+    this._renderOverlay();
+    if (this._keyHandler) {
+      document.removeEventListener("keydown", this._keyHandler);
+      this._keyHandler = null;
+    }
+  }
+
+  async _loadBody(messageId) {
+    try {
+      const token = this._hass.auth?.data?.access_token ?? "";
+      const url = `/api/email_inbox/message_body?` +
+        `entry_id=${encodeURIComponent(this._config.entry_id)}` +
+        `&message_id=${encodeURIComponent(messageId)}`;
+      const resp = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.error ?? `HTTP ${resp.status}`);
+      if (this._popup?.email?.id === messageId) {
+        this._popup = { ...this._popup, loading: false, ...data };
+        this._renderOverlay();
+      }
+    } catch (err) {
+      if (this._popup?.email?.id === messageId) {
+        this._popup = { ...this._popup, loading: false, error: String(err.message ?? err) };
+        this._renderOverlay();
+      }
+    }
+  }
+
+  _askDelete(id, subject) {
+    if (this._config.confirm_delete) {
+      this._confirm = { id, subject };
+      this._renderOverlay();
+    } else {
+      this._doService("delete_email", id);
+    }
+  }
+
+  // ── Render: card (shadow DOM) ──────────────────────────────────────────────
+  _renderCard() {
     const emails  = this._emails();
     const unread  = this._unread();
     const account = this._account();
     const unavail = this._unavail();
+    const tw      = this._config.tile_width;
 
-    const stripContent = unavail
-      ? `<div class="empty">${ICO.inbox}<span>Sensor unavailable — check integration setup</span></div>`
-      : emails.length === 0
-        ? `<div class="empty">${ICO.inbox}<span>No unread emails</span></div>`
-        : emails.map(e => this._tileHtml(e)).join("");
-
-    this.shadowRoot.innerHTML = `
-      <style>${STYLES}</style>
-      <ha-card>
-        <div class="hdr">
-          <div class="hdr-left">
-            <h2>${esc(this._config.title)}</h2>
-            <span class="badge ${unread === 0 ? "zero" : ""}">${unread}</span>
-            ${account ? `<span class="acct">${esc(account)}</span>` : ""}
-          </div>
-          <div class="hdr-right">
-            <button class="icon-btn" id="btn-refresh" title="Refresh">${ICO.refresh}</button>
-          </div>
-        </div>
-        ${this._lastErr ? `<div class="err-bar">⚠️ ${esc(this._lastErr)}</div>` : ""}
-        <div class="strip-wrap" id="strip" style="--tile-w:${this._config.tile_width}px">
-          ${stripContent}
-        </div>
-      </ha-card>
-      ${this._popup    ? this._popupHtml()   : ""}
-      ${this._confirm  ? this._confirmHtml() : ""}`;
-
-    this._bindEvents();
-  }
-
-  _tileHtml(e) {
-    const name  = senderName(e.from);
-    const color = avatarColor(name);
-    const busy  = this._busy.has(e.id);
-    return `
-      <div class="tile" data-id="${esc(e.id)}" data-open="1">
-        <div class="tile-top">
-          <div class="avatar" style="background:${color}">${esc(initials(name))}</div>
-          <div class="tile-meta">
-            <div class="tile-sender">${esc(name)}</div>
-            <div class="tile-date">${fmtDate(e.date)}</div>
-          </div>
-        </div>
-        <div class="tile-subject">${esc(e.subject || "(No Subject)")}</div>
-        ${e.snippet ? `<div class="tile-snippet">${esc(e.snippet)}</div>` : ""}
-        <div class="tile-actions">
-          <button class="tile-btn btn-read" data-action="mark_read" data-id="${esc(e.id)}" ${busy ? "disabled" : ""}>
-            ${ICO.read} Mark read
-          </button>
-          <button class="tile-btn btn-del" data-action="delete" data-id="${esc(e.id)}" data-subject="${esc(e.subject || "")}" ${busy ? "disabled" : ""}>
-            ${ICO.trash} Delete
-          </button>
-        </div>
-      </div>`;
-  }
-
-  _popupHtml() {
-    const { email, loading, body_html, body_text, error } = this._popup;
-    const name  = senderName(email.from);
-    const color = avatarColor(name);
-    const busy  = this._busy.has(email.id);
-
-    let bodyContent;
-    if (loading) {
-      bodyContent = `<div class="popup-loading">${ICO.spinner}<span>Loading message…</span></div>`;
-    } else if (error) {
-      bodyContent = `<div class="popup-err">⚠️ Failed to load message body:<br><code>${esc(error)}</code></div>`;
-    } else if (body_html) {
-      // Render HTML in sandboxed iframe
-      const encoded = encodeURIComponent(body_html);
-      bodyContent = `<iframe sandbox="allow-same-origin" srcdoc="${esc(body_html)}" id="msg-iframe"></iframe>`;
+    let strip;
+    if (unavail) {
+      strip = `<div class="empty">${I.inbox}<span>Sensor unavailable — check integration</span></div>`;
+    } else if (!emails.length) {
+      strip = `<div class="empty">${I.inbox}<span>No unread emails ✓</span></div>`;
     } else {
-      bodyContent = `<div class="plain-body">${esc(body_text || email.snippet || "(No content)")}</div>`;
+      strip = emails.map(e => {
+        const nm  = senderName(e.from);
+        const col = avatarColor(nm);
+        const bz  = this._busy.has(e.id);
+        return `
+          <div class="tile" data-id="${esc(e.id)}" data-open="1" style="--tile-w:${tw}px">
+            <div class="tile-top">
+              <div class="av" style="background:${col}">${esc(initials(nm))}</div>
+              <div class="meta">
+                <div class="sender">${esc(nm)}</div>
+                <div class="tdate">${fmtDate(e.date)}</div>
+              </div>
+            </div>
+            <div class="subj">${esc(e.subject || "(No Subject)")}</div>
+            ${e.snippet ? `<div class="snip">${esc(e.snippet)}</div>` : ""}
+            <div class="tile-acts">
+              <button class="tbtn r" data-action="mark_read" data-id="${esc(e.id)}" ${bz?"disabled":""}>
+                ${I.check} Mark read
+              </button>
+              <button class="tbtn d" data-action="delete" data-id="${esc(e.id)}" data-subject="${esc(e.subject||"")}" ${bz?"disabled":""}>
+                ${I.trash} Delete
+              </button>
+            </div>
+          </div>`;
+      }).join("");
     }
 
-    return `
-      <div class="popup-overlay" id="popup-overlay">
-        <div class="popup">
-          <div class="popup-hdr">
-            <div class="popup-avatar" style="background:${color}">${esc(initials(name))}</div>
-            <div class="popup-hdr-info">
-              <p class="popup-subject">${esc(email.subject || "(No Subject)")}</p>
-              <div class="popup-from"><strong>${esc(name)}</strong> &lt;${esc(senderEmail(email.from))}&gt;</div>
-              <div class="popup-date">${fmtDate(email.date)}</div>
-            </div>
-            <div class="popup-hdr-actions">
-              ${email.unread ? `
-                <button class="popup-action-btn btn-read" data-action="mark_read" data-id="${esc(email.id)}" ${busy ? "disabled" : ""}>
-                  ${ICO.read} Mark read
-                </button>` : ""}
-              <button class="popup-action-btn btn-del" data-action="delete_popup" data-id="${esc(email.id)}" data-subject="${esc(email.subject || "")}" ${busy ? "disabled" : ""}>
-                ${ICO.trash} Delete
-              </button>
-              <button class="popup-action-btn btn-close" id="popup-close">${ICO.close} Close</button>
-            </div>
+    this.shadowRoot.innerHTML = `
+      <style>${CARD_STYLES}</style>
+      <ha-card>
+        <div class="hdr">
+          <div class="hdr-l">
+            <h2>${esc(this._config.title)}</h2>
+            <span class="badge ${unread===0?"z":""}">${unread}</span>
+            ${account ? `<span class="acct">${esc(account)}</span>` : ""}
           </div>
-          <div class="popup-body">${bodyContent}</div>
+          <button class="icon-btn" id="btn-ref" title="Refresh">${I.refresh}</button>
         </div>
-      </div>`;
-  }
+        ${this._lastErr ? `<div class="err">⚠️ ${esc(this._lastErr)}</div>` : ""}
+        <div class="strip">${strip}</div>
+      </ha-card>`;
 
-  _confirmHtml() {
-    const { subject } = this._confirm;
-    return `
-      <div class="confirm-overlay" id="confirm-overlay">
-        <div class="confirm-box">
-          <h3>Delete this email?</h3>
-          <div class="confirm-preview">${esc(subject)}</div>
-          <p>This will move the message to Trash / Deleted Items.</p>
-          <div class="confirm-actions">
-            <button class="confirm-btn cancel" id="confirm-cancel">Cancel</button>
-            <button class="confirm-btn danger" id="confirm-ok">Delete</button>
-          </div>
-        </div>
-      </div>`;
-  }
+    // Bind card events
+    this.shadowRoot.getElementById("btn-ref")
+      ?.addEventListener("click", () => this._refresh());
 
-  // ── Event binding ──────────────────────────────────────────────────────────
-  _bindEvents() {
-    const s = this.shadowRoot;
-
-    s.getElementById("btn-refresh")?.addEventListener("click", () => this._refresh());
-
-    // Tile clicks — open popup OR action button
-    s.querySelectorAll(".tile[data-open]").forEach(tile => {
+    this.shadowRoot.querySelectorAll(".tile[data-open]").forEach(tile => {
       tile.addEventListener("click", e => {
-        const actionBtn = e.target.closest("[data-action]");
-        if (actionBtn) return; // handled separately
-        const id = tile.dataset.id;
-        const email = this._emails().find(em => em.id === id);
+        if (e.target.closest("[data-action]")) return;
+        const email = this._emails().find(em => em.id === tile.dataset.id);
         if (email) this._openPopup(email);
       });
     });
 
-    // Tile action buttons
-    s.querySelectorAll(".tile-btn[data-action]").forEach(btn => {
+    this.shadowRoot.querySelectorAll(".tbtn[data-action]").forEach(btn => {
       btn.addEventListener("click", e => {
         e.stopPropagation();
         const { action, id, subject } = btn.dataset;
         if (action === "mark_read") this._doService("mark_read", id);
-        if (action === "delete")    this._askDelete(id, subject, false);
+        if (action === "delete")    this._askDelete(id, subject);
       });
     });
+  }
 
-    // Popup actions
-    s.getElementById("popup-close")?.addEventListener("click", () => this._closePopup());
-    s.getElementById("popup-overlay")?.addEventListener("click", e => {
-      if (e.target.id === "popup-overlay") this._closePopup();
-    });
-    s.querySelectorAll(".popup-action-btn[data-action]").forEach(btn => {
-      btn.addEventListener("click", e => {
-        const { action, id, subject } = btn.dataset;
-        if (action === "mark_read")    this._doService("mark_read", id);
-        if (action === "delete_popup") this._askDelete(id, subject, true);
-      });
+  // ── Render: overlay (document.body) ──────────────────────────────────────
+  _renderOverlay() {
+    if (!this._bodyRoot) {
+      // Recreate if disconnected/GC'd
+      this._bodyRoot = document.createElement("div");
+      this._bodyRoot.id = "eic-popup-root";
+      document.body.appendChild(this._bodyRoot);
+    }
+
+    if (!this._popup && !this._confirm) {
+      this._bodyRoot.innerHTML = "";
+      return;
+    }
+
+    let html = "";
+
+    if (this._popup) {
+      const { email, loading, body_html, body_text, error } = this._popup;
+      const nm  = senderName(email.from);
+      const col = avatarColor(nm);
+      const bz  = this._busy.has(email.id);
+
+      let body;
+      if (loading) {
+        body = `<div class="eic-loading">${I.spin}<span>Loading message…</span></div>`;
+      } else if (error) {
+        body = `<div class="eic-err">⚠️ Could not load message body<code>${esc(error)}</code></div>`;
+      } else if (body_html) {
+        // srcdoc sandboxed iframe for HTML emails
+        body = `<iframe class="eic-iframe" id="eic-iframe" sandbox="allow-same-origin"
+          srcdoc="${esc(body_html)}"></iframe>`;
+      } else {
+        body = `<div class="eic-plain">${esc(body_text || email.snippet || "(No content)")}</div>`;
+      }
+
+      html += `
+        <div class="eic-overlay" id="eic-overlay">
+          <div class="eic-dialog">
+            <div class="eic-dhdr">
+              <div class="eic-av" style="background:${col}">${esc(initials(nm))}</div>
+              <div class="eic-hinfo">
+                <p class="eic-subj">${esc(email.subject || "(No Subject)")}</p>
+                <div class="eic-from"><strong>${esc(nm)}</strong> &lt;${esc(senderAddr(email.from))}&gt;</div>
+                <div class="eic-date">${fmtDate(email.date)}</div>
+              </div>
+              <div class="eic-hbtns">
+                ${email.unread ? `<button class="eic-btn r" id="eic-markread" data-id="${esc(email.id)}" ${bz?"disabled":""}>${I.check} Mark read</button>` : ""}
+                <button class="eic-btn d" id="eic-del" data-id="${esc(email.id)}" data-subject="${esc(email.subject||"")}" ${bz?"disabled":""}>${I.trash} Delete</button>
+                <button class="eic-btn cl" id="eic-close">${I.close} Close</button>
+              </div>
+            </div>
+            <div class="eic-dbody">${body}</div>
+          </div>
+        </div>`;
+    }
+
+    if (this._confirm) {
+      const { id, subject } = this._confirm;
+      html += `
+        <div class="eic-confirm-overlay" id="eic-conf-overlay">
+          <div class="eic-confirm-box">
+            <h3>Delete this email?</h3>
+            <div class="eic-subj-preview">${esc(subject)}</div>
+            <p>The message will be moved to Trash&nbsp;/&nbsp;Deleted&nbsp;Items.</p>
+            <div class="eic-confirm-row">
+              <button class="eic-confirm-btn cancel" id="eic-conf-cancel">Cancel</button>
+              <button class="eic-confirm-btn del" id="eic-conf-ok" data-id="${esc(id)}">Delete</button>
+            </div>
+          </div>
+        </div>`;
+    }
+
+    this._bodyRoot.innerHTML = html;
+    this._bindOverlayEvents();
+  }
+
+  _bindOverlayEvents() {
+    const r = this._bodyRoot;
+
+    // Close on backdrop click
+    r.querySelector("#eic-overlay")?.addEventListener("click", e => {
+      if (e.target.id === "eic-overlay") this._closePopup();
     });
 
-    // Resize iframe after load
-    const iframe = s.getElementById("msg-iframe");
+    r.getElementById?.call(r, "eic-close")?.addEventListener("click", () => this._closePopup());
+
+    r.getElementById?.call(r, "eic-markread")?.addEventListener("click", e => {
+      this._doService("mark_read", e.currentTarget.dataset.id);
+    });
+
+    r.getElementById?.call(r, "eic-del")?.addEventListener("click", e => {
+      this._askDelete(e.currentTarget.dataset.id, e.currentTarget.dataset.subject);
+    });
+
+    r.getElementById?.call(r, "eic-conf-cancel")?.addEventListener("click", () => {
+      this._confirm = null;
+      this._renderOverlay();
+    });
+
+    r.getElementById?.call(r, "eic-conf-ok")?.addEventListener("click", e => {
+      const id = e.currentTarget.dataset.id;
+      this._doService("delete_email", id);
+    });
+
+    // Auto-height iframe
+    const iframe = r.getElementById?.call(r, "eic-iframe");
     if (iframe) {
       iframe.addEventListener("load", () => {
         try {
-          const h = iframe.contentDocument?.body?.scrollHeight;
-          if (h) iframe.style.height = h + "px";
+          const h = iframe.contentDocument?.documentElement?.scrollHeight
+                 || iframe.contentDocument?.body?.scrollHeight;
+          if (h) iframe.style.height = Math.min(h, 600) + "px";
         } catch {}
       });
     }
-
-    // Confirm dialog
-    s.getElementById("confirm-cancel")?.addEventListener("click", () => {
-      this._confirm = null; this._render();
-    });
-    s.getElementById("confirm-ok")?.addEventListener("click", () => {
-      if (this._confirm) this._doService("delete_email", this._confirm.id);
-    });
-
-    // Close popup on Escape
-    const onKey = e => { if (e.key === "Escape" && this._popup) { this._closePopup(); document.removeEventListener("keydown", onKey); } };
-    if (this._popup) document.addEventListener("keydown", onKey);
   }
-
-  getCardSize() { return 4; }
 
   static getStubConfig() {
     return {
-      entity:     "sensor.gmail_inbox",
-      entry_id:   "your_config_entry_id_here",
-      title:      "Unread Emails",
-      max_display: 20,
+      entity:         "sensor.gmail_inbox",
+      entry_id:       "your_config_entry_id_here",
+      title:          "Unread Emails",
+      max_display:    20,
+      tile_width:     260,
       confirm_delete: true,
     };
   }
@@ -604,14 +683,14 @@ customElements.define("email-inbox-card", EmailInboxCard);
 
 window.customCards ??= [];
 window.customCards.push({
-  type: "email-inbox-card",
-  name: "Email Inbox Card",
-  description: "Horizontal strip of unread emails (Gmail & M365) with full popup reader, delete, and mark-read.",
-  preview: false,
+  type:        "email-inbox-card",
+  name:        "Email Inbox Card",
+  description: "Full-width horizontal strip of unread emails with popup reader, delete, and mark-read.",
+  preview:     false,
 });
 
 console.info(
   `%c EMAIL-INBOX-CARD %c v${CARD_VERSION} `,
-  "color:#fff;background:#6366f1;padding:2px 5px;border-radius:4px 0 0 4px;font-weight:bold",
-  "color:#6366f1;background:#f1f5f9;padding:2px 5px;border-radius:0 4px 4px 0"
+  "color:#fff;background:#6366f1;padding:2px 6px;border-radius:4px 0 0 4px;font-weight:bold",
+  "color:#6366f1;background:#f1f5f9;padding:2px 6px;border-radius:0 4px 4px 0"
 );
