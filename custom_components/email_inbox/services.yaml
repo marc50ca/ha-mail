@@ -1,0 +1,37 @@
+delete_email:
+  name: Delete Email
+  description: Move an email to Trash (Gmail) or Deleted Items (Microsoft 365).
+  fields:
+    entry_id:
+      name: Entry ID
+      description: Config entry ID of the email account (found in Settings → Integrations → Email Inbox → entry info).
+      required: true
+      example: "abc123def456"
+      selector:
+        text:
+    message_id:
+      name: Message ID
+      description: The email message ID from the sensor's 'emails' attribute.
+      required: true
+      example: "18c1234abcd"
+      selector:
+        text:
+
+mark_read:
+  name: Mark Email as Read
+  description: Remove the unread flag from an email.
+  fields:
+    entry_id:
+      name: Entry ID
+      description: Config entry ID of the email account.
+      required: true
+      example: "abc123def456"
+      selector:
+        text:
+    message_id:
+      name: Message ID
+      description: The email message ID from the sensor's 'emails' attribute.
+      required: true
+      example: "18c1234abcd"
+      selector:
+        text:
