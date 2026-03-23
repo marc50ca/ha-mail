@@ -259,7 +259,13 @@ class MicrosoftClient:
             raise Exception(f"Failed to mark message {message_id} read: HTTP {status}")
 
     async def async_fetch_message_body(self, message_id: str) -> dict:
-        """Fetch the full body of a single Microsoft 365 message."""
+        """Fetch the full body of a single Microsoft 365 message.
+
+        Graph API returns the body as a string (not base64), but it can still
+        contain null bytes or Unicode line separators from HTML content.
+        Those are cleaned by api_view._safe_json before being sent to the client.
+        """
+        # Cap body at 256 KB — $top is not applicable here but we slice after
         data = await self._async_api_request(
             f"{GRAPH_API}/me/messages/{message_id}",
             params={
@@ -273,8 +279,9 @@ class MicrosoftClient:
             for r in data.get("toRecipients", [])
         ]
         body_content = data.get("body", {})
-        content_type = body_content.get("contentType", "text")
-        body_value = body_content.get("content", data.get("bodyPreview", ""))
+        content_type = body_content.get("contentType", "text").lower()
+        # Slice to 256 KB worth of characters to avoid massive responses
+        body_value = body_content.get("content", data.get("bodyPreview", ""))[:262144]
 
         return {
             "id": message_id,
@@ -282,6 +289,6 @@ class MicrosoftClient:
             "from": f"{sender.get('name', '')} <{sender.get('address', '')}>".strip(),
             "to": ", ".join(to_list),
             "date": data.get("receivedDateTime", ""),
-            "body_html": body_value if content_type == "html" else "",
-            "body_text": body_value if content_type == "text" else data.get("bodyPreview", ""),
+            "body_html": body_value if "html" in content_type else "",
+            "body_text": body_value if "html" not in content_type else data.get("bodyPreview", ""),
         }

@@ -9,7 +9,7 @@
  *  - Confirm dialog also on document.body
  */
 
-const CARD_VERSION = "3.1.0";
+const CARD_VERSION = "3.4.0";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 const esc = s => String(s ?? "")
@@ -88,12 +88,15 @@ const CARD_STYLES = `
   .badge.z { background: var(--div); color: var(--txt2); }
   .acct { font-size: .72rem; color: var(--txt2); }
   .icon-btn {
-    background: none; border: none; cursor: pointer; padding: 6px;
+    background: none; border: none; cursor: pointer; padding: 10px;
     border-radius: 8px; color: var(--txt2); display: flex; align-items: center;
     transition: background .15s, color .15s;
+    touch-action: manipulation;
+    -webkit-tap-highlight-color: transparent;
+    min-height: 44px; min-width: 44px;
   }
   .icon-btn:hover { background: rgba(99,102,241,.1); color: var(--acc); }
-  .icon-btn svg { width: 16px; height: 16px; }
+  .icon-btn svg { width: 16px; height: 16px; pointer-events: none; }
 
   /* Error bar */
   .err { margin: 8px 20px; padding: 10px 14px; border-radius: 8px;
@@ -123,12 +126,17 @@ const CARD_STYLES = `
     padding: 14px;
     cursor: pointer;
     display: flex; flex-direction: column; gap: 8px;
-    transition: transform .15s, box-shadow .15s;
+    /* No transform on hover — transforms create stacking contexts that break
+       child touch targets on iOS Safari */
+    transition: box-shadow .15s, border-color .15s;
     background: var(--bg);
     min-height: 136px;
     user-select: none;
+    -webkit-tap-highlight-color: transparent;
+    touch-action: manipulation;
   }
-  .tile:hover { transform: translateY(-2px); box-shadow: 0 6px 20px rgba(0,0,0,.1); }
+  .tile:hover { box-shadow: 0 6px 20px rgba(0,0,0,.1); border-color: var(--acc); }
+  .tile:active { box-shadow: 0 2px 8px rgba(0,0,0,.12); }
   .tile-top { display: flex; align-items: center; gap: 10px; }
   .av {
     width: 36px; height: 36px; border-radius: 50%; flex-shrink: 0;
@@ -154,8 +162,14 @@ const CARD_STYLES = `
     font-size: .72rem; font-weight: 600; padding: 5px 8px;
     border: none; border-radius: 6px; cursor: pointer;
     transition: background .15s;
+    touch-action: manipulation;
+    -webkit-tap-highlight-color: transparent;
+    /* Min tap target size for mobile accessibility */
+    min-height: 40px;
   }
-  .tbtn svg { width: 13px; height: 13px; flex-shrink: 0; }
+  .tbtn svg { width: 13px; height: 13px; flex-shrink: 0;
+    /* SVGs must not receive pointer events so e.target is always the button */
+    pointer-events: none; }
   .tbtn.r { background: rgba(99,102,241,.1); color: var(--acc); }
   .tbtn.r:hover { background: rgba(99,102,241,.22); }
   .tbtn.d { background: rgba(239,68,68,.08); color: var(--danger); }
@@ -191,11 +205,13 @@ const POPUP_STYLES = `
   }
   .eic-overlay {
     position: fixed; inset: 0; z-index: 999999;
-    background: rgba(0,0,0,.6);
-    backdrop-filter: blur(4px);
+    background: rgba(0,0,0,.65);
+    /* backdrop-filter removed — causes compositing layer that intercepts
+       touch events on iOS Safari and Android Chrome */
     display: flex; align-items: center; justify-content: center;
     padding: 24px;
     animation: eicFadeIn .15s ease;
+    touch-action: none; /* prevent scroll-through on mobile */
   }
   @keyframes eicFadeIn { from { opacity:0 } to { opacity:1 } }
   .eic-dialog {
@@ -207,13 +223,36 @@ const POPUP_STYLES = `
     box-shadow: 0 32px 80px rgba(0,0,0,.35);
     overflow: hidden;
     animation: eicSlide .18s ease;
+    position: relative; /* needed for the absolute close button */
   }
+  /* Prominent close button — always visible in top-right corner of dialog */
+  .eic-close-btn {
+    position: absolute;
+    top: 12px; right: 12px;
+    width: 36px; height: 36px;
+    border-radius: 50%;
+    background: var(--div);
+    border: none;
+    cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+    color: var(--txt1);
+    font-size: 1.1rem;
+    font-weight: 700;
+    line-height: 1;
+    z-index: 10;
+    transition: background .15s, transform .1s;
+    touch-action: manipulation;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .eic-close-btn:hover  { background: #cbd5e1; }
+  .eic-close-btn:active { transform: scale(.92); }
+  .eic-close-btn svg { width: 16px; height: 16px; pointer-events: none; }
   @keyframes eicSlide { from { transform:translateY(18px);opacity:0 } to { transform:none;opacity:1 } }
 
   /* Dialog header */
   .eic-dhdr {
     display: flex; align-items: flex-start; gap: 14px;
-    padding: 20px 20px 16px;
+    padding: 20px 60px 16px 20px; /* right padding leaves room for the X button */
     border-bottom: 1px solid var(--div);
     flex-shrink: 0;
   }
@@ -238,10 +277,13 @@ const POPUP_STYLES = `
   .eic-btn {
     display: flex; align-items: center; gap: 5px;
     font-size: .8rem; font-weight: 600;
-    padding: 8px 14px; border: none; border-radius: 8px;
+    padding: 10px 16px; border: none; border-radius: 8px;
     cursor: pointer; transition: background .15s; white-space: nowrap;
+    touch-action: manipulation;
+    -webkit-tap-highlight-color: transparent;
+    min-height: 44px;
   }
-  .eic-btn svg { width: 14px; height: 14px; flex-shrink: 0; }
+  .eic-btn svg { width: 14px; height: 14px; flex-shrink: 0; pointer-events: none; }
   .eic-btn.r  { background: rgba(99,102,241,.12); color: var(--acc); }
   .eic-btn.r:hover  { background: rgba(99,102,241,.24); }
   .eic-btn.d  { background: rgba(239,68,68,.1); color: var(--danger); }
@@ -294,9 +336,12 @@ const POPUP_STYLES = `
   }
   .eic-confirm-row { display: flex; gap: 10px; }
   .eic-confirm-btn {
-    flex: 1; padding: 11px; border: none; border-radius: 8px;
+    flex: 1; padding: 14px; border: none; border-radius: 8px;
     cursor: pointer; font-size: .88rem; font-weight: 600;
     transition: opacity .15s;
+    touch-action: manipulation;
+    -webkit-tap-highlight-color: transparent;
+    min-height: 48px;
   }
   .eic-confirm-btn:hover { opacity: .85; }
   .eic-confirm-btn.cancel { background: var(--div); color: var(--txt1); }
@@ -529,19 +574,33 @@ class EmailInboxCard extends HTMLElement {
       </ha-card>`;
 
     // Bind card events
-    this.shadowRoot.getElementById("btn-ref")
-      ?.addEventListener("click", () => this._refresh());
+    const sr = this.shadowRoot;
 
-    this.shadowRoot.querySelectorAll(".tile[data-open]").forEach(tile => {
-      tile.addEventListener("click", e => {
-        if (e.target.closest("[data-action]")) return;
+    // Helper: bind both click and touchend for maximum mobile compatibility.
+    // touchend uses preventDefault() to stop the subsequent synthetic click
+    // from double-firing, while still propagating correctly.
+    const on = (el, fn) => {
+      if (!el) return;
+      el.addEventListener("click", fn);
+      el.addEventListener("touchend", e => { e.preventDefault(); fn(e); });
+    };
+
+    on(sr.querySelector("#btn-ref"), () => this._refresh());
+
+    sr.querySelectorAll(".tile[data-open]").forEach(tile => {
+      // Tile body tap — open popup (ignore taps that land on action buttons)
+      on(tile, e => {
+        // Use composedPath for shadow DOM compat, fall back to target
+        const path = e.composedPath ? e.composedPath() : [e.target];
+        const hitBtn = path.some(el => el.dataset && el.dataset.action);
+        if (hitBtn) return;
         const email = this._emails().find(em => em.id === tile.dataset.id);
         if (email) this._openPopup(email);
       });
     });
 
-    this.shadowRoot.querySelectorAll(".tbtn[data-action]").forEach(btn => {
-      btn.addEventListener("click", e => {
+    sr.querySelectorAll(".tbtn[data-action]").forEach(btn => {
+      on(btn, e => {
         e.stopPropagation();
         const { action, id, subject } = btn.dataset;
         if (action === "mark_read") this._doService("mark_read", id);
@@ -573,21 +632,25 @@ class EmailInboxCard extends HTMLElement {
       const bz  = this._busy.has(email.id);
 
       let body;
+      this._pendingIframeHtml = null;
       if (loading) {
         body = `<div class="eic-loading">${I.spin}<span>Loading message…</span></div>`;
       } else if (error) {
         body = `<div class="eic-err">⚠️ Could not load message body<code>${esc(error)}</code></div>`;
       } else if (body_html) {
-        // srcdoc sandboxed iframe for HTML emails
-        body = `<iframe class="eic-iframe" id="eic-iframe" sandbox="allow-same-origin"
-          srcdoc="${esc(body_html)}"></iframe>`;
+        // Placeholder — actual src set via JS Blob URL after render
+        // (avoids srcdoc attribute-length limits and double-escaping by esc())
+        body = `<iframe class="eic-iframe" id="eic-iframe" sandbox="allow-same-origin allow-scripts"></iframe>`;
+        this._pendingIframeHtml = body_html;
       } else {
+        this._pendingIframeHtml = null;
         body = `<div class="eic-plain">${esc(body_text || email.snippet || "(No content)")}</div>`;
       }
 
       html += `
         <div class="eic-overlay" id="eic-overlay">
           <div class="eic-dialog">
+            <button class="eic-close-btn" id="eic-close" title="Close">${I.close}</button>
             <div class="eic-dhdr">
               <div class="eic-av" style="background:${col}">${esc(initials(nm))}</div>
               <div class="eic-hinfo">
@@ -598,7 +661,6 @@ class EmailInboxCard extends HTMLElement {
               <div class="eic-hbtns">
                 ${email.unread ? `<button class="eic-btn r" id="eic-markread" data-id="${esc(email.id)}" ${bz?"disabled":""}>${I.check} Mark read</button>` : ""}
                 <button class="eic-btn d" id="eic-del" data-id="${esc(email.id)}" data-subject="${esc(email.subject||"")}" ${bz?"disabled":""}>${I.trash} Delete</button>
-                <button class="eic-btn cl" id="eic-close">${I.close} Close</button>
               </div>
             </div>
             <div class="eic-dbody">${body}</div>
@@ -627,49 +689,74 @@ class EmailInboxCard extends HTMLElement {
   }
 
   _bindOverlayEvents() {
-    // NOTE: this._bodyRoot is a plain <div> appended to document.body.
-    // Plain divs do NOT have getElementById — use querySelector("#id") instead.
+    // this._bodyRoot is a plain <div> — use querySelector, NOT getElementById.
     const $ = sel => this._bodyRoot.querySelector(sel);
 
-    // Close popup when clicking the dark backdrop (not the dialog itself)
-    $("#eic-overlay")?.addEventListener("click", e => {
-      if (e.target.id === "eic-overlay") this._closePopup();
-    });
+    // ── Backdrop close ──────────────────────────────────────────────────────
+    // Use pointerdown so the event fires before any child button click/tap,
+    // which prevents a race condition on mobile where a 300ms delayed click
+    // on a button could also bubble up and close the popup.
+    // We track whether the pointer went down ON the backdrop (not the dialog)
+    // and only close if it also came up on the backdrop.
+    const overlay = $("#eic-overlay");
+    if (overlay) {
+      let _backdropDown = false;
+      overlay.addEventListener("pointerdown", e => {
+        _backdropDown = e.target === overlay;
+      }, { passive: true });
+      overlay.addEventListener("pointerup", e => {
+        if (_backdropDown && e.target === overlay) this._closePopup();
+        _backdropDown = false;
+      }, { passive: true });
+    }
 
-    // Close button inside the popup header
-    $("#eic-close")?.addEventListener("click", () => this._closePopup());
+    // Stop ALL clicks/touches from bubbling out of the dialog box so they
+    // can never accidentally trigger the backdrop close above.
+    $(".eic-dialog")?.addEventListener("pointerdown", e => e.stopPropagation());
+    $(".eic-confirm-box")?.addEventListener("pointerdown", e => e.stopPropagation());
 
-    // Mark as read button inside the popup header
-    $("#eic-markread")?.addEventListener("click", e => {
-      this._doService("mark_read", e.currentTarget.dataset.id);
-    });
+    // ── Popup header buttons ────────────────────────────────────────────────
+    const bindBtn = (sel, fn) => {
+      const el = $(sel);
+      if (!el) return;
+      // Both click (desktop) and touchend (mobile fallback) to maximise compat
+      const handler = e => { e.stopPropagation(); fn(e); };
+      el.addEventListener("click", handler);
+      el.addEventListener("touchend", e => { e.preventDefault(); handler(e); });
+    };
 
-    // Delete button inside the popup header
-    $("[id='eic-del']")?.addEventListener("click", e => {
-      this._askDelete(e.currentTarget.dataset.id, e.currentTarget.dataset.subject);
-    });
+    bindBtn("#eic-close",    ()  => this._closePopup());
+    bindBtn("#eic-markread", e   => this._doService("mark_read",
+                                      e.currentTarget.dataset.id));
+    bindBtn("[id='eic-del']", e => this._askDelete(
+                                      e.currentTarget.dataset.id,
+                                      e.currentTarget.dataset.subject));
 
-    // Confirm dialog — cancel
-    $("#eic-conf-cancel")?.addEventListener("click", () => {
-      this._confirm = null;
-      this._renderOverlay();
-    });
+    // ── Confirm dialog buttons ──────────────────────────────────────────────
+    bindBtn("#eic-conf-cancel", () => { this._confirm = null; this._renderOverlay(); });
+    bindBtn("#eic-conf-ok",     e  => this._doService("delete_email",
+                                         e.currentTarget.dataset.id));
 
-    // Confirm dialog — confirm delete
-    $("#eic-conf-ok")?.addEventListener("click", e => {
-      this._doService("delete_email", e.currentTarget.dataset.id);
-    });
-
-    // Auto-size HTML email iframe to its content
+    // ── Iframe: load HTML via Blob URL ────────────────────────────────────────
+    // Using Blob URL instead of srcdoc avoids:
+    //   1. esc() double-encoding the HTML entities
+    //   2. Browser attribute-length limits on srcdoc (~2MB on some browsers)
+    //   3. Encoding issues with special characters in the HTML
     const iframe = $("[id='eic-iframe']");
-    if (iframe) {
+    if (iframe && this._pendingIframeHtml) {
+      const html = this._pendingIframeHtml;
+      this._pendingIframeHtml = null;
+      const blob = new Blob([html], { type: "text/html;charset=utf-8" });
+      const blobUrl = URL.createObjectURL(blob);
       iframe.addEventListener("load", () => {
+        URL.revokeObjectURL(blobUrl);
         try {
           const h = iframe.contentDocument?.documentElement?.scrollHeight
                  || iframe.contentDocument?.body?.scrollHeight;
-          if (h) iframe.style.height = Math.min(h, 600) + "px";
+          if (h) iframe.style.height = Math.min(h + 32, 600) + "px";
         } catch {}
-      });
+      }, { once: true });
+      iframe.src = blobUrl;
     }
   }
 

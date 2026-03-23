@@ -207,6 +207,14 @@ class GmailClient:
 
     async def async_fetch_message_body(self, message_id: str) -> dict:
         """Fetch the full body of a single Gmail message."""
+        import base64 as _b64
+
+        def _b64decode(s: str) -> bytes:
+            """Decode Gmail base64url with correct padding (strip then re-add)."""
+            s = s.rstrip("=")
+            s += "=" * ((4 - len(s) % 4) % 4)
+            return _b64.urlsafe_b64decode(s)
+
         data = await self._async_api_request(
             f"{GMAIL_API_BASE}/users/me/messages/{message_id}",
             params={"format": "full"},
@@ -219,18 +227,26 @@ class GmailClient:
 
         body_html = ""
         body_text = ""
+        # Cap decoded body at 256 KB to prevent huge JSON responses
+        MAX_BYTES = 256 * 1024
 
         def _extract_parts(payload: dict) -> None:
             nonlocal body_html, body_text
             mime = payload.get("mimeType", "")
             body_data = payload.get("body", {}).get("data", "")
 
-            if mime == "text/html" and body_data:
-                import base64
-                body_html = base64.urlsafe_b64decode(body_data + "==").decode("utf-8", errors="replace")
-            elif mime == "text/plain" and body_data and not body_html:
-                import base64
-                body_text = base64.urlsafe_b64decode(body_data + "==").decode("utf-8", errors="replace")
+            if mime == "text/html" and body_data and not body_html:
+                try:
+                    raw = _b64decode(body_data)[:MAX_BYTES]
+                    body_html = raw.decode("utf-8", errors="replace")
+                except Exception as e:
+                    _LOGGER.warning("Failed to decode HTML body: %s", e)
+            elif mime == "text/plain" and body_data and not body_text:
+                try:
+                    raw = _b64decode(body_data)[:MAX_BYTES]
+                    body_text = raw.decode("utf-8", errors="replace")
+                except Exception as e:
+                    _LOGGER.warning("Failed to decode text body: %s", e)
 
             for part in payload.get("parts", []):
                 _extract_parts(part)
