@@ -1,15 +1,18 @@
 /**
- * email-inbox-card  v3.0.0
+ * email-inbox-card  v4.0.0
  *
- * Changes from v2:
- *  - Full-width: getGridOptions() + :host grid-column:1/-1
- *  - Popup rendered on document.body (outside all shadow DOMs) so
- *    position:fixed works correctly across the full viewport
- *  - Popup cleaned up on disconnectedCallback
- *  - Confirm dialog also on document.body
+ * Mobile-first rewrite:
+ * - ONLY uses click events (no touchend duplication).
+ *   touch-action:manipulation already removes the 300ms delay.
+ * - Popup appended to document.body (escapes shadow-DOM stacking context).
+ * - Backdrop uses a dedicated transparent div behind the dialog — clicking it
+ *   always closes; no e.target comparison needed.
+ * - e.currentTarget never accessed outside a live dispatch (fixes null bug).
+ * - All interactive elements: min 44×44px, touch-action:manipulation,
+ *   -webkit-tap-highlight-color:transparent, pointer-events:none on SVG children.
  */
 
-const CARD_VERSION = "3.4.0";
+const CARD_VERSION = "4.0.0";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 const esc = s => String(s ?? "")
@@ -33,7 +36,7 @@ const senderName = from => {
   const m = from.match(/^"?([^"<]+?)"?\s*(?:<.*>)?$/);
   return (m ? m[1] : from.split("@")[0]).trim();
 };
-const senderAddr = from => (String(from??"").match(/<([^>]+)>/) ?? [])[1] ?? from;
+const senderAddr = from => (String(from ?? "").match(/<([^>]+)>/) ?? [])[1] ?? from;
 
 function initials(n) {
   const p = n.split(/\s+/).filter(Boolean);
@@ -47,147 +50,149 @@ function avatarColor(n) {
   return C[Math.abs(h) % C.length];
 }
 
-// ── Icons ─────────────────────────────────────────────────────────────────────
+// ── SVG Icons ─────────────────────────────────────────────────────────────────
+// All SVGs have pointer-events:none so e.target is always the parent button.
+const SVG = attr => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
+  stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+  style="pointer-events:none;flex-shrink:0" ${attr}`;
 const I = {
-  refresh:`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15"/></svg>`,
-  trash:  `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4h6v2"/></svg>`,
-  check:  `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 11-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>`,
-  close:  `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>`,
-  inbox:  `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/><path d="M5.45 5.11L2 12v6a2 2 0 002 2h16a2 2 0 002-2v-6l-3.45-6.89A2 2 0 0016.76 4H7.24a2 2 0 00-1.79 1.11z"/></svg>`,
-  spin:   `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="10" stroke-dasharray="31.4" stroke-dashoffset="10" stroke-linecap="round"><animateTransform attributeName="transform" type="rotate" dur="0.75s" repeatCount="indefinite" from="0 12 12" to="360 12 12"/></circle></svg>`,
+  refresh: SVG('width="17" height="17">') + `<polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15"/></svg>`,
+  trash:   SVG('width="15" height="15">') + `<polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4h6v2"/></svg>`,
+  check:   SVG('width="15" height="15">') + `<path d="M22 11.08V12a10 10 0 11-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>`,
+  close:   SVG('width="16" height="16">') + `<line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>`,
+  inbox:   SVG('width="40" height="40" style="opacity:.25;pointer-events:none">') + `<polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/><path d="M5.45 5.11L2 12v6a2 2 0 002 2h16a2 2 0 002-2v-6l-3.45-6.89A2 2 0 0016.76 4H7.24a2 2 0 00-1.79 1.11z"/></svg>`,
+  spin:    `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" width="28" height="28" style="pointer-events:none"><circle cx="12" cy="12" r="10" stroke-dasharray="31.4" stroke-dashoffset="10" stroke-linecap="round"><animateTransform attributeName="transform" type="rotate" dur="0.75s" repeatCount="indefinite" from="0 12 12" to="360 12 12"/></circle></svg>`,
 };
 
-// ── Card shadow-DOM styles (card only, no overlay) ─────────────────────────
+// ── Reusable mobile-safe button style ─────────────────────────────────────────
+// Applied to every interactive element; eliminates 300ms tap delay via
+// touch-action:manipulation; clears the iOS tap flash.
+const BTN_BASE = [
+  "cursor:pointer",
+  "touch-action:manipulation",
+  "-webkit-tap-highlight-color:transparent",
+  "user-select:none",
+  "border:none",
+  "-webkit-appearance:none",
+].join(";");
+
+// ── Card shadow-DOM styles ────────────────────────────────────────────────────
 const CARD_STYLES = `
   :host {
     display: block;
-    /* Full-width inside HA's CSS grid */
     grid-column: 1 / -1;
-    --bg:      var(--ha-card-background, var(--card-background-color, #fff));
-    --txt1:    var(--primary-text-color, #1e293b);
-    --txt2:    var(--secondary-text-color, #64748b);
-    --div:     var(--divider-color, #e2e8f0);
-    --acc:     var(--accent-color, #6366f1);
-    --danger:  #ef4444;
+    --bg:     var(--ha-card-background, var(--card-background-color, #fff));
+    --txt1:   var(--primary-text-color, #1e293b);
+    --txt2:   var(--secondary-text-color, #64748b);
+    --div:    var(--divider-color, #e2e8f0);
+    --acc:    var(--accent-color, #6366f1);
+    --danger: #ef4444;
   }
   ha-card { overflow: hidden; width: 100%; }
 
-  /* Header */
   .hdr {
     display: flex; align-items: center; justify-content: space-between;
-    padding: 14px 20px 12px;
-    border-bottom: 1px solid var(--div);
+    padding: 14px 20px 12px; border-bottom: 1px solid var(--div);
   }
   .hdr-l { display: flex; align-items: center; gap: 10px; }
-  .hdr h2 { margin: 0; font-size: .95rem; font-weight: 700; color: var(--txt1); }
+  .hdr h2 { margin:0; font-size:.95rem; font-weight:700; color:var(--txt1); }
   .badge {
-    background: var(--acc); color: #fff;
-    border-radius: 20px; padding: 2px 9px;
-    font-size: .7rem; font-weight: 700;
+    background: var(--acc); color:#fff; border-radius:20px;
+    padding:2px 9px; font-size:.7rem; font-weight:700;
   }
-  .badge.z { background: var(--div); color: var(--txt2); }
-  .acct { font-size: .72rem; color: var(--txt2); }
+  .badge.z { background:var(--div); color:var(--txt2); }
+  .acct { font-size:.72rem; color:var(--txt2); }
   .icon-btn {
-    background: none; border: none; cursor: pointer; padding: 10px;
-    border-radius: 8px; color: var(--txt2); display: flex; align-items: center;
-    transition: background .15s, color .15s;
-    touch-action: manipulation;
-    -webkit-tap-highlight-color: transparent;
-    min-height: 44px; min-width: 44px;
+    background:none; padding:10px; border-radius:8px;
+    color:var(--txt2); display:flex; align-items:center;
+    transition:background .15s, color .15s;
+    min-height:44px; min-width:44px;
+    cursor:pointer; touch-action:manipulation;
+    -webkit-tap-highlight-color:transparent;
+    border:none; -webkit-appearance:none;
   }
-  .icon-btn:hover { background: rgba(99,102,241,.1); color: var(--acc); }
-  .icon-btn svg { width: 16px; height: 16px; pointer-events: none; }
+  .icon-btn:hover { background:rgba(99,102,241,.1); color:var(--acc); }
 
-  /* Error bar */
-  .err { margin: 8px 20px; padding: 10px 14px; border-radius: 8px;
-    background: rgba(239,68,68,.08); border-left: 3px solid var(--danger);
-    font-size: .8rem; color: var(--danger); }
+  .err {
+    margin:8px 20px; padding:10px 14px; border-radius:8px;
+    background:rgba(239,68,68,.08); border-left:3px solid var(--danger);
+    font-size:.8rem; color:var(--danger);
+  }
 
-  /* Horizontal scroll strip */
   .strip {
-    display: flex; align-items: stretch; gap: 14px;
-    overflow-x: auto; overflow-y: hidden;
-    padding: 16px 20px 18px;
-    scroll-snap-type: x mandatory;
-    -webkit-overflow-scrolling: touch;
-    scrollbar-width: thin;
-    scrollbar-color: var(--div) transparent;
+    display:flex; align-items:stretch; gap:14px;
+    overflow-x:auto; overflow-y:hidden;
+    padding:16px 20px 18px;
+    scroll-snap-type:x mandatory;
+    -webkit-overflow-scrolling:touch;
+    scrollbar-width:thin; scrollbar-color:var(--div) transparent;
   }
-  .strip::-webkit-scrollbar { height: 5px; }
-  .strip::-webkit-scrollbar-thumb { background: var(--div); border-radius: 3px; }
+  .strip::-webkit-scrollbar { height:5px; }
+  .strip::-webkit-scrollbar-thumb { background:var(--div); border-radius:3px; }
 
-  /* Tile */
   .tile {
-    flex: 0 0 var(--tile-w, 260px);
-    scroll-snap-align: start;
-    border: 1px solid var(--div);
-    border-left: 3px solid var(--acc);
-    border-radius: 10px;
-    padding: 14px;
-    cursor: pointer;
-    display: flex; flex-direction: column; gap: 8px;
-    /* No transform on hover — transforms create stacking contexts that break
-       child touch targets on iOS Safari */
-    transition: box-shadow .15s, border-color .15s;
-    background: var(--bg);
-    min-height: 136px;
-    user-select: none;
-    -webkit-tap-highlight-color: transparent;
-    touch-action: manipulation;
+    flex:0 0 var(--tile-w,260px); scroll-snap-align:start;
+    border:1px solid var(--div); border-left:3px solid var(--acc);
+    border-radius:10px; padding:14px;
+    display:flex; flex-direction:column; gap:8px;
+    transition:box-shadow .15s, border-color .15s;
+    background:var(--bg); min-height:136px;
+    cursor:pointer; touch-action:manipulation;
+    -webkit-tap-highlight-color:transparent; user-select:none;
   }
-  .tile:hover { box-shadow: 0 6px 20px rgba(0,0,0,.1); border-color: var(--acc); }
-  .tile:active { box-shadow: 0 2px 8px rgba(0,0,0,.12); }
-  .tile-top { display: flex; align-items: center; gap: 10px; }
+  .tile:hover { box-shadow:0 6px 20px rgba(0,0,0,.1); border-color:var(--acc); }
+  .tile:active { box-shadow:0 2px 8px rgba(0,0,0,.12); }
+
+  .tile-top { display:flex; align-items:center; gap:10px; }
   .av {
-    width: 36px; height: 36px; border-radius: 50%; flex-shrink: 0;
-    display: flex; align-items: center; justify-content: center;
-    font-size: .75rem; font-weight: 700; color: #fff;
+    width:36px; height:36px; border-radius:50%; flex-shrink:0;
+    display:flex; align-items:center; justify-content:center;
+    font-size:.75rem; font-weight:700; color:#fff; pointer-events:none;
   }
-  .meta { flex: 1; min-width: 0; }
-  .sender { font-size: .82rem; font-weight: 700; color: var(--txt1);
-    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .tdate  { font-size: .68rem; color: var(--txt2); margin-top: 1px; }
-  .subj   { font-size: .82rem; font-weight: 600; color: var(--txt1);
-    overflow: hidden; display: -webkit-box;
-    -webkit-line-clamp: 2; -webkit-box-orient: vertical; line-height: 1.35; }
-  .snip   { font-size: .76rem; color: var(--txt2); flex: 1;
-    overflow: hidden; display: -webkit-box;
-    -webkit-line-clamp: 2; -webkit-box-orient: vertical; line-height: 1.4; }
+  .meta { flex:1; min-width:0; pointer-events:none; }
+  .sender { font-size:.82rem; font-weight:700; color:var(--txt1);
+    white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .tdate { font-size:.68rem; color:var(--txt2); margin-top:1px; }
+  .subj {
+    font-size:.82rem; font-weight:600; color:var(--txt1); pointer-events:none;
+    overflow:hidden; display:-webkit-box;
+    -webkit-line-clamp:2; -webkit-box-orient:vertical; line-height:1.35;
+  }
+  .snip {
+    font-size:.76rem; color:var(--txt2); flex:1; pointer-events:none;
+    overflow:hidden; display:-webkit-box;
+    -webkit-line-clamp:2; -webkit-box-orient:vertical; line-height:1.4;
+  }
   .tile-acts {
-    display: flex; gap: 6px; margin-top: auto;
-    padding-top: 8px; border-top: 1px solid var(--div);
+    display:flex; gap:6px; margin-top:auto;
+    padding-top:8px; border-top:1px solid var(--div);
   }
   .tbtn {
-    flex: 1; display: flex; align-items: center; justify-content: center; gap: 5px;
-    font-size: .72rem; font-weight: 600; padding: 5px 8px;
-    border: none; border-radius: 6px; cursor: pointer;
-    transition: background .15s;
-    touch-action: manipulation;
-    -webkit-tap-highlight-color: transparent;
-    /* Min tap target size for mobile accessibility */
-    min-height: 40px;
+    flex:1; display:flex; align-items:center; justify-content:center; gap:5px;
+    font-size:.72rem; font-weight:600; padding:5px 8px;
+    border-radius:6px; transition:background .15s;
+    min-height:44px;
+    cursor:pointer; touch-action:manipulation;
+    -webkit-tap-highlight-color:transparent;
+    border:none; -webkit-appearance:none;
   }
-  .tbtn svg { width: 13px; height: 13px; flex-shrink: 0;
-    /* SVGs must not receive pointer events so e.target is always the button */
-    pointer-events: none; }
-  .tbtn.r { background: rgba(99,102,241,.1); color: var(--acc); }
-  .tbtn.r:hover { background: rgba(99,102,241,.22); }
-  .tbtn.d { background: rgba(239,68,68,.08); color: var(--danger); }
-  .tbtn.d:hover { background: rgba(239,68,68,.18); }
-  .tbtn:disabled { opacity: .4; pointer-events: none; }
+  .tbtn.r { background:rgba(99,102,241,.1); color:var(--acc); }
+  .tbtn.r:hover { background:rgba(99,102,241,.22); }
+  .tbtn.d { background:rgba(239,68,68,.08); color:var(--danger); }
+  .tbtn.d:hover { background:rgba(239,68,68,.18); }
+  .tbtn:disabled { opacity:.4; pointer-events:none; }
 
-  /* Empty state */
   .empty {
-    display: flex; flex-direction: column; align-items: center; gap: 10px;
-    padding: 32px; width: 100%; color: var(--txt2); font-size: .88rem;
+    display:flex; flex-direction:column; align-items:center; gap:10px;
+    padding:32px; width:100%; color:var(--txt2); font-size:.88rem;
   }
-  .empty svg { width: 40px; height: 40px; opacity: .25; }
 `;
 
-// ── Popup styles — injected into document.body element (NOT shadow DOM) ──────
-const POPUP_STYLES = `
-  #eic-popup-root * { box-sizing: border-box; }
-  #eic-popup-root {
+// ── Popup / overlay styles — lives on document.body, NOT in shadow DOM ────────
+const POPUP_CSS = `
+  #eic-root { font-family: var(--paper-font-body1_-_font-family, sans-serif); }
+  #eic-root *, #eic-root *::before, #eic-root *::after { box-sizing:border-box; }
+  #eic-root {
     --bg:     #ffffff;
     --txt1:   #1e293b;
     --txt2:   #64748b;
@@ -196,208 +201,195 @@ const POPUP_STYLES = `
     --danger: #ef4444;
   }
   @media (prefers-color-scheme: dark) {
-    #eic-popup-root {
-      --bg:   #1e293b;
-      --txt1: #f1f5f9;
-      --txt2: #94a3b8;
-      --div:  #334155;
-    }
+    #eic-root { --bg:#1e293b; --txt1:#f1f5f9; --txt2:#94a3b8; --div:#334155; }
   }
-  .eic-overlay {
-    position: fixed; inset: 0; z-index: 999999;
-    background: rgba(0,0,0,.65);
-    /* backdrop-filter removed — causes compositing layer that intercepts
-       touch events on iOS Safari and Android Chrome */
-    display: flex; align-items: center; justify-content: center;
-    padding: 24px;
-    animation: eicFadeIn .15s ease;
-    touch-action: none; /* prevent scroll-through on mobile */
-  }
-  @keyframes eicFadeIn { from { opacity:0 } to { opacity:1 } }
-  .eic-dialog {
-    background: var(--bg);
-    border-radius: 16px;
-    width: 100%; max-width: 760px;
-    max-height: 88vh;
-    display: flex; flex-direction: column;
-    box-shadow: 0 32px 80px rgba(0,0,0,.35);
-    overflow: hidden;
-    animation: eicSlide .18s ease;
-    position: relative; /* needed for the absolute close button */
-  }
-  /* Prominent close button — always visible in top-right corner of dialog */
-  .eic-close-btn {
-    position: absolute;
-    top: 12px; right: 12px;
-    width: 36px; height: 36px;
-    border-radius: 50%;
-    background: var(--div);
-    border: none;
-    cursor: pointer;
-    display: flex; align-items: center; justify-content: center;
-    color: var(--txt1);
-    font-size: 1.1rem;
-    font-weight: 700;
-    line-height: 1;
-    z-index: 10;
-    transition: background .15s, transform .1s;
-    touch-action: manipulation;
-    -webkit-tap-highlight-color: transparent;
-  }
-  .eic-close-btn:hover  { background: #cbd5e1; }
-  .eic-close-btn:active { transform: scale(.92); }
-  .eic-close-btn svg { width: 16px; height: 16px; pointer-events: none; }
-  @keyframes eicSlide { from { transform:translateY(18px);opacity:0 } to { transform:none;opacity:1 } }
 
-  /* Dialog header */
-  .eic-dhdr {
-    display: flex; align-items: flex-start; gap: 14px;
-    padding: 20px 60px 16px 20px; /* right padding leaves room for the X button */
-    border-bottom: 1px solid var(--div);
-    flex-shrink: 0;
+  /* ── Backdrop ── */
+  .eic-backdrop {
+    position:fixed; inset:0; z-index:999998;
+    background:rgba(0,0,0,.65);
+    /* No backdrop-filter — causes compositing layer that swallows
+       touch events on iOS Safari / Android Chrome */
+    animation:eicFade .15s ease;
+    cursor:pointer; touch-action:manipulation;
+    -webkit-tap-highlight-color:transparent;
+  }
+  @keyframes eicFade { from{opacity:0} to{opacity:1} }
+
+  /* ── Dialog ── */
+  .eic-dialog {
+    position:fixed; z-index:999999;
+    top:50%; left:50%; transform:translate(-50%,-50%);
+    width:calc(100% - 32px); max-width:760px;
+    max-height:88vh;
+    background:var(--bg);
+    border-radius:16px;
+    display:flex; flex-direction:column;
+    box-shadow:0 32px 80px rgba(0,0,0,.35);
+    overflow:hidden;
+    animation:eicSlide .18s ease;
+    /* Prevent dialog from accidentally closing via backdrop touch-through */
+    touch-action:pan-y;
+  }
+  @keyframes eicSlide { from{transform:translate(-50%,-46%);opacity:0} to{transform:translate(-50%,-50%);opacity:1} }
+
+  /* ── Close ×  button (top-right corner of dialog) ── */
+  .eic-x {
+    position:absolute; top:10px; right:10px; z-index:2;
+    width:40px; height:40px; border-radius:50%;
+    background:var(--div); color:var(--txt1);
+    display:flex; align-items:center; justify-content:center;
+    transition:background .15s;
+    cursor:pointer; touch-action:manipulation;
+    -webkit-tap-highlight-color:transparent;
+    border:none; -webkit-appearance:none;
+  }
+  .eic-x:hover  { background:#cbd5e1; }
+  .eic-x:active { transform:scale(.9); }
+
+  /* ── Header ── */
+  .eic-hdr {
+    display:flex; align-items:flex-start; gap:14px;
+    padding:20px 60px 16px 20px;
+    border-bottom:1px solid var(--div); flex-shrink:0;
   }
   .eic-av {
-    width: 46px; height: 46px; border-radius: 50%; flex-shrink: 0;
-    display: flex; align-items: center; justify-content: center;
-    font-size: .92rem; font-weight: 700; color: #fff;
+    width:46px; height:46px; border-radius:50%; flex-shrink:0;
+    display:flex; align-items:center; justify-content:center;
+    font-size:.92rem; font-weight:700; color:#fff; pointer-events:none;
   }
-  .eic-hinfo { flex: 1; min-width: 0; }
+  .eic-hi { flex:1; min-width:0; }
   .eic-subj {
-    font-size: 1.05rem; font-weight: 700; color: var(--txt1);
-    margin: 0 0 5px; line-height: 1.3; word-break: break-word;
+    font-size:1.05rem; font-weight:700; color:var(--txt1);
+    margin:0 0 4px; line-height:1.3; word-break:break-word;
   }
-  .eic-from { font-size: .82rem; color: var(--txt2); }
-  .eic-from strong { color: var(--txt1); font-weight: 600; }
-  .eic-date { font-size: .76rem; color: var(--txt2); margin-top: 3px; }
+  .eic-from { font-size:.82rem; color:var(--txt2); }
+  .eic-from strong { color:var(--txt1); font-weight:600; }
+  .eic-date { font-size:.75rem; color:var(--txt2); margin-top:3px; }
 
-  .eic-hbtns {
-    display: flex; gap: 7px; flex-shrink: 0;
-    flex-wrap: wrap; align-items: flex-start; justify-content: flex-end;
+  .eic-btns {
+    display:flex; gap:8px; flex-wrap:wrap;
+    padding:12px 20px; border-bottom:1px solid var(--div);
+    flex-shrink:0;
   }
   .eic-btn {
-    display: flex; align-items: center; gap: 5px;
-    font-size: .8rem; font-weight: 600;
-    padding: 10px 16px; border: none; border-radius: 8px;
-    cursor: pointer; transition: background .15s; white-space: nowrap;
-    touch-action: manipulation;
-    -webkit-tap-highlight-color: transparent;
-    min-height: 44px;
+    display:flex; align-items:center; gap:6px;
+    font-size:.82rem; font-weight:600;
+    padding:10px 16px; border-radius:8px;
+    min-height:44px;
+    transition:background .15s; white-space:nowrap;
+    cursor:pointer; touch-action:manipulation;
+    -webkit-tap-highlight-color:transparent;
+    border:none; -webkit-appearance:none;
   }
-  .eic-btn svg { width: 14px; height: 14px; flex-shrink: 0; pointer-events: none; }
-  .eic-btn.r  { background: rgba(99,102,241,.12); color: var(--acc); }
-  .eic-btn.r:hover  { background: rgba(99,102,241,.24); }
-  .eic-btn.d  { background: rgba(239,68,68,.1); color: var(--danger); }
-  .eic-btn.d:hover  { background: rgba(239,68,68,.22); }
-  .eic-btn.cl { background: var(--div); color: var(--txt1); }
-  .eic-btn.cl:hover { background: #cbd5e1; }
-  .eic-btn:disabled { opacity: .4; pointer-events: none; }
+  .eic-btn.r { background:rgba(99,102,241,.12); color:var(--acc); }
+  .eic-btn.r:hover { background:rgba(99,102,241,.24); }
+  .eic-btn.d { background:rgba(239,68,68,.1);  color:var(--danger); }
+  .eic-btn.d:hover { background:rgba(239,68,68,.22); }
+  .eic-btn:disabled { opacity:.4; pointer-events:none; }
 
-  /* Dialog body */
-  .eic-dbody {
-    flex: 1; overflow-y: auto; padding: 20px;
-    font-size: .9rem; line-height: 1.7; color: var(--txt1);
+  /* ── Body ── */
+  .eic-body {
+    flex:1; overflow-y:auto; padding:20px;
+    font-size:.9rem; line-height:1.7; color:var(--txt1);
+    -webkit-overflow-scrolling:touch;
   }
   .eic-loading {
-    display: flex; flex-direction: column; align-items: center;
-    justify-content: center; gap: 14px; padding: 56px;
-    color: var(--txt2); font-size: .9rem;
+    display:flex; flex-direction:column; align-items:center;
+    justify-content:center; gap:14px; padding:56px;
+    color:var(--txt2); font-size:.9rem;
   }
-  .eic-loading svg { width: 30px; height: 30px; color: var(--acc); }
-  .eic-err { color: var(--danger); padding: 28px; text-align: center; font-size: .88rem; }
+  .eic-err { color:var(--danger); padding:28px; text-align:center; font-size:.88rem; }
   .eic-err code { display:block; margin-top:8px; font-size:.78rem; opacity:.8; }
   .eic-plain {
-    white-space: pre-wrap; word-break: break-word;
-    font-family: inherit; font-size: .88rem;
-    color: var(--txt1); line-height: 1.7;
+    white-space:pre-wrap; word-break:break-word;
+    font-family:inherit; font-size:.88rem; color:var(--txt1); line-height:1.7;
   }
   .eic-iframe {
-    width: 100%; border: none; min-height: 300px;
-    border-radius: 8px; background: #fff; display: block;
+    width:100%; border:none; min-height:300px;
+    border-radius:8px; background:#fff; display:block;
   }
 
-  /* Confirm overlay — stacks above popup */
-  .eic-confirm-overlay {
-    position: fixed; inset: 0; z-index: 1000000;
-    background: rgba(0,0,0,.65);
-    display: flex; align-items: center; justify-content: center; padding: 24px;
+  /* ── Confirm dialog (stacks above popup) ── */
+  .eic-conf-backdrop {
+    position:fixed; inset:0; z-index:1000000;
+    background:rgba(0,0,0,.7);
+    cursor:pointer; touch-action:manipulation;
+    -webkit-tap-highlight-color:transparent;
   }
-  .eic-confirm-box {
-    background: var(--bg); border-radius: 14px; padding: 30px 24px;
-    max-width: 360px; width: 100%; text-align: center;
-    box-shadow: 0 20px 56px rgba(0,0,0,.3);
+  .eic-conf-box {
+    position:fixed; z-index:1000001;
+    top:50%; left:50%; transform:translate(-50%,-50%);
+    width:calc(100% - 48px); max-width:360px;
+    background:var(--bg); border-radius:14px;
+    padding:28px 24px; text-align:center;
+    box-shadow:0 20px 56px rgba(0,0,0,.3);
+    touch-action:pan-y;
   }
-  .eic-confirm-box h3 { margin: 0 0 8px; font-size: 1rem; color: var(--txt1); }
-  .eic-confirm-box p  { margin: 0 0 16px; font-size: .84rem; color: var(--txt2); }
-  .eic-subj-preview {
-    font-size: .82rem; font-weight: 600; color: var(--txt1);
-    background: var(--div); border-radius: 6px; padding: 8px 12px;
-    margin-bottom: 20px; overflow: hidden; text-overflow: ellipsis;
-    white-space: nowrap;
+  .eic-conf-box h3 { margin:0 0 8px; font-size:1rem; color:var(--txt1); }
+  .eic-conf-box p  { margin:0 0 16px; font-size:.84rem; color:var(--txt2); }
+  .eic-conf-prev {
+    font-size:.82rem; font-weight:600; color:var(--txt1);
+    background:var(--div); border-radius:6px; padding:8px 12px;
+    margin-bottom:20px; overflow:hidden; text-overflow:ellipsis;
+    white-space:nowrap;
   }
-  .eic-confirm-row { display: flex; gap: 10px; }
-  .eic-confirm-btn {
-    flex: 1; padding: 14px; border: none; border-radius: 8px;
-    cursor: pointer; font-size: .88rem; font-weight: 600;
-    transition: opacity .15s;
-    touch-action: manipulation;
-    -webkit-tap-highlight-color: transparent;
-    min-height: 48px;
+  .eic-conf-row { display:flex; gap:10px; }
+  .eic-conf-btn {
+    flex:1; padding:14px; border-radius:8px;
+    font-size:.88rem; font-weight:600; min-height:48px;
+    transition:opacity .15s;
+    cursor:pointer; touch-action:manipulation;
+    -webkit-tap-highlight-color:transparent;
+    border:none; -webkit-appearance:none;
   }
-  .eic-confirm-btn:hover { opacity: .85; }
-  .eic-confirm-btn.cancel { background: var(--div); color: var(--txt1); }
-  .eic-confirm-btn.del    { background: var(--danger); color: #fff; }
+  .eic-conf-btn:hover { opacity:.85; }
+  .eic-conf-btn.cancel { background:var(--div); color:var(--txt1); }
+  .eic-conf-btn.del    { background:var(--danger); color:#fff; }
 `;
 
 // ── Custom Element ────────────────────────────────────────────────────────────
 class EmailInboxCard extends HTMLElement {
   constructor() {
     super();
-    this.attachShadow({ mode: "open" });
+    this.attachShadow({ mode:"open" });
     this._hass   = null;
     this._config = {};
-    this._popup  = null;   // { email, loading, body_html, body_text, error }
-    this._confirm= null;   // { id, subject }
+    this._popup  = null;
+    this._confirm= null;
     this._busy   = new Set();
     this._lastErr= "";
-
-    // Root element appended to document.body for overlays
-    this._bodyRoot = null;
+    this._root   = null;   // div on document.body
+    this._pendingIframeHtml = null;
     this._keyHandler = null;
   }
 
-  // ── Lifecycle ───────────────────────────────────────────────────────────────
+  // ── Lifecycle ────────────────────────────────────────────────────────────────
   connectedCallback() {
-    // Inject global popup styles once
-    if (!document.getElementById("eic-global-styles")) {
+    // Inject global styles once
+    if (!document.getElementById("eic-global-css")) {
       const s = document.createElement("style");
-      s.id = "eic-global-styles";
-      s.textContent = POPUP_STYLES;
+      s.id = "eic-global-css";
+      s.textContent = POPUP_CSS;
       document.head.appendChild(s);
     }
-    // Create the body-level root for overlays
-    if (!this._bodyRoot) {
-      this._bodyRoot = document.createElement("div");
-      this._bodyRoot.id = "eic-popup-root";
-      document.body.appendChild(this._bodyRoot);
+    if (!this._root) {
+      this._root = document.createElement("div");
+      this._root.id = "eic-root";
+      document.body.appendChild(this._root);
     }
   }
 
   disconnectedCallback() {
-    this._removeBodyRoot();
+    this._root?.remove();
+    this._root = null;
     if (this._keyHandler) {
       document.removeEventListener("keydown", this._keyHandler);
       this._keyHandler = null;
     }
   }
 
-  _removeBodyRoot() {
-    if (this._bodyRoot) {
-      this._bodyRoot.remove();
-      this._bodyRoot = null;
-    }
-  }
-
-  // ── Config ──────────────────────────────────────────────────────────────────
+  // ── Config ───────────────────────────────────────────────────────────────────
   setConfig(cfg) {
     if (!cfg.entity)   throw new Error("email-inbox-card: 'entity' is required");
     if (!cfg.entry_id) throw new Error("email-inbox-card: 'entry_id' is required");
@@ -412,48 +404,43 @@ class EmailInboxCard extends HTMLElement {
     this._renderCard();
   }
 
-  set hass(hass) {
-    this._hass = hass;
-    this._renderCard();
-  }
+  set hass(hass) { this._hass = hass; this._renderCard(); }
 
-  // ── Data helpers ─────────────────────────────────────────────────────────────
+  // ── Data ─────────────────────────────────────────────────────────────────────
   _st()     { return this._hass?.states?.[this._config.entity]; }
   _emails() {
     return (this._st()?.attributes?.emails ?? [])
-      .filter(e => e.unread)
-      .slice(0, this._config.max_display);
+      .filter(e => e.unread).slice(0, this._config.max_display);
   }
   _unread() { return this._st()?.attributes?.unread_count ?? 0; }
   _account(){ return this._st()?.attributes?.account ?? ""; }
-  _unavail(){ const s = this._st()?.state; return !s || s==="unavailable" || s==="unknown"; }
+  _unavail(){ const s = this._st()?.state; return !s||s==="unavailable"||s==="unknown"; }
 
-  // ── HA grid — tell HA this card wants full width ──────────────────────────
-  getGridOptions() {
-    return { columns: 12, rows: 3, min_columns: 4, min_rows: 2 };
-  }
-  getCardSize() { return 3; }
+  getGridOptions() { return { columns:12, rows:3, min_columns:4, min_rows:2 }; }
+  getCardSize()    { return 3; }
 
-  // ── Service calls ────────────────────────────────────────────────────────────
-  async _doService(service, messageId) {
-    this._busy.add(messageId);
+  // ── Services ─────────────────────────────────────────────────────────────────
+  async _doService(service, msgId) {
+    if (!msgId || msgId === "undefined") {
+      this._lastErr = "Missing message ID — refresh the card and try again";
+      this._renderCard();
+      return;
+    }
+    this._busy.add(msgId);
     this._lastErr = "";
     this._renderCard();
     this._renderOverlay();
     try {
-      await this._hass.callService("email_inbox", service, {
-        entry_id:   this._config.entry_id,
-        message_id: messageId,
-      });
+      await this._hass.callService("email_inbox", service,
+        { entry_id: this._config.entry_id, message_id: msgId });
     } catch (err) {
       this._lastErr = String(err?.message ?? err);
       console.error("email-inbox-card:", err);
     } finally {
-      this._busy.delete(messageId);
+      this._busy.delete(msgId);
       this._confirm = null;
-      if (service === "delete_email" && this._popup?.email?.id === messageId) {
+      if (service === "delete_email" && this._popup?.email?.id === msgId)
         this._popup = null;
-      }
       this._renderCard();
       this._renderOverlay();
     }
@@ -461,24 +448,23 @@ class EmailInboxCard extends HTMLElement {
 
   async _refresh() {
     try {
-      await this._hass.callService("homeassistant", "update_entity",
+      await this._hass.callService("homeassistant","update_entity",
         { entity_id: this._config.entity });
     } catch {}
   }
 
-  // ── Popup ─────────────────────────────────────────────────────────────────
+  // ── Popup lifecycle ──────────────────────────────────────────────────────────
   _openPopup(email) {
-    this._popup = { email, loading: true, body_html: "", body_text: "", error: "" };
+    this._popup = { email, loading:true, body_html:"", body_text:"", error:"" };
     this._renderOverlay();
     this._loadBody(email.id);
-    // Keyboard close
     if (this._keyHandler) document.removeEventListener("keydown", this._keyHandler);
     this._keyHandler = e => { if (e.key === "Escape") this._closePopup(); };
     document.addEventListener("keydown", this._keyHandler);
   }
 
   _closePopup() {
-    this._popup = null;
+    this._popup  = null;
     this._confirm = null;
     this._renderOverlay();
     if (this._keyHandler) {
@@ -487,22 +473,22 @@ class EmailInboxCard extends HTMLElement {
     }
   }
 
-  async _loadBody(messageId) {
+  async _loadBody(msgId) {
     try {
       const token = this._hass.auth?.data?.access_token ?? "";
       const url = `/api/email_inbox/message_body?` +
         `entry_id=${encodeURIComponent(this._config.entry_id)}` +
-        `&message_id=${encodeURIComponent(messageId)}`;
-      const resp = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+        `&message_id=${encodeURIComponent(msgId)}`;
+      const resp = await fetch(url, { headers:{ Authorization:`Bearer ${token}` } });
       const data = await resp.json();
       if (!resp.ok) throw new Error(data.error ?? `HTTP ${resp.status}`);
-      if (this._popup?.email?.id === messageId) {
-        this._popup = { ...this._popup, loading: false, ...data };
+      if (this._popup?.email?.id === msgId) {
+        this._popup = { ...this._popup, loading:false, ...data };
         this._renderOverlay();
       }
     } catch (err) {
-      if (this._popup?.email?.id === messageId) {
-        this._popup = { ...this._popup, loading: false, error: String(err.message ?? err) };
+      if (this._popup?.email?.id === msgId) {
+        this._popup = { ...this._popup, loading:false, error:String(err.message ?? err) };
         this._renderOverlay();
       }
     }
@@ -517,7 +503,7 @@ class EmailInboxCard extends HTMLElement {
     }
   }
 
-  // ── Render: card (shadow DOM) ──────────────────────────────────────────────
+  // ── Render: card (shadow DOM) ─────────────────────────────────────────────
   _renderCard() {
     const emails  = this._emails();
     const unread  = this._unread();
@@ -527,7 +513,7 @@ class EmailInboxCard extends HTMLElement {
 
     let strip;
     if (unavail) {
-      strip = `<div class="empty">${I.inbox}<span>Sensor unavailable — check integration</span></div>`;
+      strip = `<div class="empty">${I.inbox}<span>Sensor unavailable</span></div>`;
     } else if (!emails.length) {
       strip = `<div class="empty">${I.inbox}<span>No unread emails ✓</span></div>`;
     } else {
@@ -536,7 +522,7 @@ class EmailInboxCard extends HTMLElement {
         const col = avatarColor(nm);
         const bz  = this._busy.has(e.id);
         return `
-          <div class="tile" data-id="${esc(e.id)}" data-open="1" style="--tile-w:${tw}px">
+          <div class="tile" data-tile-id="${esc(e.id)}" style="--tile-w:${tw}px">
             <div class="tile-top">
               <div class="av" style="background:${col}">${esc(initials(nm))}</div>
               <div class="meta">
@@ -547,10 +533,10 @@ class EmailInboxCard extends HTMLElement {
             <div class="subj">${esc(e.subject || "(No Subject)")}</div>
             ${e.snippet ? `<div class="snip">${esc(e.snippet)}</div>` : ""}
             <div class="tile-acts">
-              <button class="tbtn r" data-action="mark_read" data-id="${esc(e.id)}" ${bz?"disabled":""}>
+              <button class="tbtn r" data-act="mark_read" data-id="${esc(e.id)}" ${bz?"disabled":""}>
                 ${I.check} Mark read
               </button>
-              <button class="tbtn d" data-action="delete" data-id="${esc(e.id)}" data-subject="${esc(e.subject||"")}" ${bz?"disabled":""}>
+              <button class="tbtn d" data-act="delete" data-id="${esc(e.id)}" data-subject="${esc(e.subject||"")}" ${bz?"disabled":""}>
                 ${I.trash} Delete
               </button>
             </div>
@@ -573,190 +559,163 @@ class EmailInboxCard extends HTMLElement {
         <div class="strip">${strip}</div>
       </ha-card>`;
 
-    // Bind card events
-    const sr = this.shadowRoot;
+    // ── Card event listeners ──────────────────────────────────────────────────
+    // Use only 'click'. touch-action:manipulation on every element removes the
+    // 300ms delay, so click fires immediately on mobile. No touchend needed.
 
-    // Helper: bind both click and touchend for maximum mobile compatibility.
-    // touchend uses preventDefault() to stop the subsequent synthetic click
-    // from double-firing, while still propagating correctly.
-    const on = (el, fn) => {
-      if (!el) return;
-      el.addEventListener("click", fn);
-      el.addEventListener("touchend", e => { e.preventDefault(); fn(e); });
-    };
+    this.shadowRoot.getElementById("btn-ref")
+      ?.addEventListener("click", () => this._refresh());
 
-    on(sr.querySelector("#btn-ref"), () => this._refresh());
-
-    sr.querySelectorAll(".tile[data-open]").forEach(tile => {
-      // Tile body tap — open popup (ignore taps that land on action buttons)
-      on(tile, e => {
-        // Use composedPath for shadow DOM compat, fall back to target
-        const path = e.composedPath ? e.composedPath() : [e.target];
-        const hitBtn = path.some(el => el.dataset && el.dataset.action);
-        if (hitBtn) return;
-        const email = this._emails().find(em => em.id === tile.dataset.id);
+    this.shadowRoot.querySelectorAll(".tile[data-tile-id]").forEach(tile => {
+      tile.addEventListener("click", e => {
+        // If the click target (or any ancestor up to the tile) has data-act,
+        // it's an action button — let that handler deal with it.
+        if (e.target.closest("[data-act]")) return;
+        const email = this._emails().find(em => em.id === tile.dataset.tileId);
         if (email) this._openPopup(email);
       });
     });
 
-    sr.querySelectorAll(".tbtn[data-action]").forEach(btn => {
-      on(btn, e => {
+    this.shadowRoot.querySelectorAll("[data-act]").forEach(btn => {
+      btn.addEventListener("click", e => {
         e.stopPropagation();
-        const { action, id, subject } = btn.dataset;
-        if (action === "mark_read") this._doService("mark_read", id);
-        if (action === "delete")    this._askDelete(id, subject);
+        const { act, id, subject } = btn.dataset;
+        if (act === "mark_read") this._doService("mark_read", id);
+        if (act === "delete")    this._askDelete(id, subject);
       });
     });
   }
 
-  // ── Render: overlay (document.body) ──────────────────────────────────────
+  // ── Render: overlay (document.body) ─────────────────────────────────────────
   _renderOverlay() {
-    if (!this._bodyRoot) {
-      // Recreate if disconnected/GC'd
-      this._bodyRoot = document.createElement("div");
-      this._bodyRoot.id = "eic-popup-root";
-      document.body.appendChild(this._bodyRoot);
+    if (!this._root) {
+      this._root = document.createElement("div");
+      this._root.id = "eic-root";
+      document.body.appendChild(this._root);
     }
 
-    if (!this._popup && !this._confirm) {
-      this._bodyRoot.innerHTML = "";
-      return;
-    }
+    // Clear everything first
+    this._root.innerHTML = "";
 
-    let html = "";
+    if (!this._popup && !this._confirm) return;
 
+    // ── Popup ─────────────────────────────────────────────────────────────────
     if (this._popup) {
       const { email, loading, body_html, body_text, error } = this._popup;
       const nm  = senderName(email.from);
       const col = avatarColor(nm);
       const bz  = this._busy.has(email.id);
 
-      let body;
+      let bodyHtml;
       this._pendingIframeHtml = null;
       if (loading) {
-        body = `<div class="eic-loading">${I.spin}<span>Loading message…</span></div>`;
+        bodyHtml = `<div class="eic-loading">${I.spin}<span>Loading message…</span></div>`;
       } else if (error) {
-        body = `<div class="eic-err">⚠️ Could not load message body<code>${esc(error)}</code></div>`;
+        bodyHtml = `<div class="eic-err">⚠️ Could not load message<code>${esc(error)}</code></div>`;
       } else if (body_html) {
-        // Placeholder — actual src set via JS Blob URL after render
-        // (avoids srcdoc attribute-length limits and double-escaping by esc())
-        body = `<iframe class="eic-iframe" id="eic-iframe" sandbox="allow-same-origin allow-scripts"></iframe>`;
+        bodyHtml = `<iframe class="eic-iframe" id="eic-iframe" sandbox="allow-same-origin allow-scripts"></iframe>`;
         this._pendingIframeHtml = body_html;
       } else {
-        this._pendingIframeHtml = null;
-        body = `<div class="eic-plain">${esc(body_text || email.snippet || "(No content)")}</div>`;
+        bodyHtml = `<div class="eic-plain">${esc(body_text || email.snippet || "(No content)")}</div>`;
       }
 
-      html += `
-        <div class="eic-overlay" id="eic-overlay">
-          <div class="eic-dialog">
-            <button class="eic-close-btn" id="eic-close" title="Close">${I.close}</button>
-            <div class="eic-dhdr">
-              <div class="eic-av" style="background:${col}">${esc(initials(nm))}</div>
-              <div class="eic-hinfo">
-                <p class="eic-subj">${esc(email.subject || "(No Subject)")}</p>
-                <div class="eic-from"><strong>${esc(nm)}</strong> &lt;${esc(senderAddr(email.from))}&gt;</div>
-                <div class="eic-date">${fmtDate(email.date)}</div>
-              </div>
-              <div class="eic-hbtns">
-                ${email.unread ? `<button class="eic-btn r" id="eic-markread" data-id="${esc(email.id)}" ${bz?"disabled":""}>${I.check} Mark read</button>` : ""}
-                <button class="eic-btn d" id="eic-del" data-id="${esc(email.id)}" data-subject="${esc(email.subject||"")}" ${bz?"disabled":""}>${I.trash} Delete</button>
-              </div>
-            </div>
-            <div class="eic-dbody">${body}</div>
+      // Backdrop is a separate div BEHIND the dialog.
+      // Clicking it closes the popup. The dialog itself is a sibling, not a child,
+      // so clicks on buttons inside the dialog never reach the backdrop at all.
+      const backdrop = document.createElement("div");
+      backdrop.className = "eic-backdrop";
+      backdrop.addEventListener("click", () => this._closePopup());
+      this._root.appendChild(backdrop);
+
+      const dialog = document.createElement("div");
+      dialog.className = "eic-dialog";
+      dialog.innerHTML = `
+        <button class="eic-x" id="eic-x" title="Close">${I.close}</button>
+        <div class="eic-hdr">
+          <div class="eic-av" style="background:${col}">${esc(initials(nm))}</div>
+          <div class="eic-hi">
+            <p class="eic-subj">${esc(email.subject || "(No Subject)")}</p>
+            <div class="eic-from"><strong>${esc(nm)}</strong> &lt;${esc(senderAddr(email.from))}&gt;</div>
+            <div class="eic-date">${fmtDate(email.date)}</div>
           </div>
-        </div>`;
+        </div>
+        <div class="eic-btns">
+          ${email.unread
+            ? `<button class="eic-btn r" id="eic-markread" data-id="${esc(email.id)}" ${bz?"disabled":""}>${I.check} Mark read</button>`
+            : ""}
+          <button class="eic-btn d" id="eic-del" data-id="${esc(email.id)}" data-subject="${esc(email.subject||"")}" ${bz?"disabled":""}>${I.trash} Delete</button>
+        </div>
+        <div class="eic-body">${bodyHtml}</div>`;
+      this._root.appendChild(dialog);
+
+      // ── Bind popup buttons using direct element references (no querySelector ID lookup) ──
+      dialog.querySelector("#eic-x")
+        .addEventListener("click", () => this._closePopup());
+
+      const mrBtn = dialog.querySelector("#eic-markread");
+      if (mrBtn) {
+        const id = mrBtn.dataset.id;
+        mrBtn.addEventListener("click", () => this._doService("mark_read", id));
+      }
+
+      const delBtn = dialog.querySelector("#eic-del");
+      if (delBtn) {
+        const id      = delBtn.dataset.id;
+        const subject = delBtn.dataset.subject;
+        delBtn.addEventListener("click", () => this._askDelete(id, subject));
+      }
+
+      // Load iframe via Blob URL
+      const iframe = dialog.querySelector("#eic-iframe");
+      if (iframe && this._pendingIframeHtml) {
+        const html = this._pendingIframeHtml;
+        this._pendingIframeHtml = null;
+        const blob    = new Blob([html], { type:"text/html;charset=utf-8" });
+        const blobUrl = URL.createObjectURL(blob);
+        iframe.addEventListener("load", () => {
+          URL.revokeObjectURL(blobUrl);
+          try {
+            const h = iframe.contentDocument?.documentElement?.scrollHeight
+                   || iframe.contentDocument?.body?.scrollHeight;
+            if (h) iframe.style.height = Math.min(h + 32, 600) + "px";
+          } catch {}
+        }, { once:true });
+        iframe.src = blobUrl;
+      }
     }
 
+    // ── Confirm dialog ────────────────────────────────────────────────────────
     if (this._confirm) {
       const { id, subject } = this._confirm;
-      html += `
-        <div class="eic-confirm-overlay" id="eic-conf-overlay">
-          <div class="eic-confirm-box">
-            <h3>Delete this email?</h3>
-            <div class="eic-subj-preview">${esc(subject)}</div>
-            <p>The message will be moved to Trash&nbsp;/&nbsp;Deleted&nbsp;Items.</p>
-            <div class="eic-confirm-row">
-              <button class="eic-confirm-btn cancel" id="eic-conf-cancel">Cancel</button>
-              <button class="eic-confirm-btn del" id="eic-conf-ok" data-id="${esc(id)}">Delete</button>
-            </div>
-          </div>
+
+      const confBackdrop = document.createElement("div");
+      confBackdrop.className = "eic-conf-backdrop";
+      confBackdrop.addEventListener("click", () => {
+        this._confirm = null;
+        this._renderOverlay();
+      });
+      this._root.appendChild(confBackdrop);
+
+      const box = document.createElement("div");
+      box.className = "eic-conf-box";
+      box.innerHTML = `
+        <h3>Delete this email?</h3>
+        <div class="eic-conf-prev">${esc(subject)}</div>
+        <p>The message will be moved to Trash / Deleted Items.</p>
+        <div class="eic-conf-row">
+          <button class="eic-conf-btn cancel" id="eic-cancel">Cancel</button>
+          <button class="eic-conf-btn del"    id="eic-ok">Delete</button>
         </div>`;
-    }
+      this._root.appendChild(box);
 
-    this._bodyRoot.innerHTML = html;
-    this._bindOverlayEvents();
-  }
-
-  _bindOverlayEvents() {
-    // this._bodyRoot is a plain <div> — use querySelector, NOT getElementById.
-    const $ = sel => this._bodyRoot.querySelector(sel);
-
-    // ── Backdrop close ──────────────────────────────────────────────────────
-    // Use pointerdown so the event fires before any child button click/tap,
-    // which prevents a race condition on mobile where a 300ms delayed click
-    // on a button could also bubble up and close the popup.
-    // We track whether the pointer went down ON the backdrop (not the dialog)
-    // and only close if it also came up on the backdrop.
-    const overlay = $("#eic-overlay");
-    if (overlay) {
-      let _backdropDown = false;
-      overlay.addEventListener("pointerdown", e => {
-        _backdropDown = e.target === overlay;
-      }, { passive: true });
-      overlay.addEventListener("pointerup", e => {
-        if (_backdropDown && e.target === overlay) this._closePopup();
-        _backdropDown = false;
-      }, { passive: true });
-    }
-
-    // Stop ALL clicks/touches from bubbling out of the dialog box so they
-    // can never accidentally trigger the backdrop close above.
-    $(".eic-dialog")?.addEventListener("pointerdown", e => e.stopPropagation());
-    $(".eic-confirm-box")?.addEventListener("pointerdown", e => e.stopPropagation());
-
-    // ── Popup header buttons ────────────────────────────────────────────────
-    const bindBtn = (sel, fn) => {
-      const el = $(sel);
-      if (!el) return;
-      // Both click (desktop) and touchend (mobile fallback) to maximise compat
-      const handler = e => { e.stopPropagation(); fn(e); };
-      el.addEventListener("click", handler);
-      el.addEventListener("touchend", e => { e.preventDefault(); handler(e); });
-    };
-
-    bindBtn("#eic-close",    ()  => this._closePopup());
-    bindBtn("#eic-markread", e   => this._doService("mark_read",
-                                      e.currentTarget.dataset.id));
-    bindBtn("[id='eic-del']", e => this._askDelete(
-                                      e.currentTarget.dataset.id,
-                                      e.currentTarget.dataset.subject));
-
-    // ── Confirm dialog buttons ──────────────────────────────────────────────
-    bindBtn("#eic-conf-cancel", () => { this._confirm = null; this._renderOverlay(); });
-    bindBtn("#eic-conf-ok",     e  => this._doService("delete_email",
-                                         e.currentTarget.dataset.id));
-
-    // ── Iframe: load HTML via Blob URL ────────────────────────────────────────
-    // Using Blob URL instead of srcdoc avoids:
-    //   1. esc() double-encoding the HTML entities
-    //   2. Browser attribute-length limits on srcdoc (~2MB on some browsers)
-    //   3. Encoding issues with special characters in the HTML
-    const iframe = $("[id='eic-iframe']");
-    if (iframe && this._pendingIframeHtml) {
-      const html = this._pendingIframeHtml;
-      this._pendingIframeHtml = null;
-      const blob = new Blob([html], { type: "text/html;charset=utf-8" });
-      const blobUrl = URL.createObjectURL(blob);
-      iframe.addEventListener("load", () => {
-        URL.revokeObjectURL(blobUrl);
-        try {
-          const h = iframe.contentDocument?.documentElement?.scrollHeight
-                 || iframe.contentDocument?.body?.scrollHeight;
-          if (h) iframe.style.height = Math.min(h + 32, 600) + "px";
-        } catch {}
-      }, { once: true });
-      iframe.src = blobUrl;
+      // Direct element reference binding — no querySelector id games
+      box.querySelector("#eic-cancel").addEventListener("click", () => {
+        this._confirm = null;
+        this._renderOverlay();
+      });
+      box.querySelector("#eic-ok").addEventListener("click", () => {
+        this._doService("delete_email", id);
+      });
     }
   }
 
@@ -778,7 +737,7 @@ window.customCards ??= [];
 window.customCards.push({
   type:        "email-inbox-card",
   name:        "Email Inbox Card",
-  description: "Full-width horizontal strip of unread emails with popup reader, delete, and mark-read.",
+  description: "Full-width unread email strip with popup reader, delete and mark-read. Mobile-optimised.",
   preview:     false,
 });
 
